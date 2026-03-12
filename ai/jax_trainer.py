@@ -38,12 +38,12 @@ DT = 0.010
 TRACE_DECAY = 0.70
 DEFAULT_MOTOR_NOISE_SCALE = 0.60
 
-EPISODE_S = 60.0
+EPISODE_S = 300.0
 BRAIN_DT = 0.050
 MOTOR_SCALE = 6.0
 GOAL_HEIGHT_M = 0.16
 FIELD_HALF = 15.0
-POP_SIZE = 8
+POP_SIZE = 200
 SIGMA = 0.05
 LR = 0.05
 MAX_MOTOR_RAD_S = 8.0
@@ -914,13 +914,14 @@ class JaxESTrainer:
         else:
             normalized = np.zeros_like(returns_np)
 
-        grad = (np.asarray(noise, dtype=np.float32).T @ normalized) / (POP_SIZE * SIGMA)
-        self._params = self._params + jnp.asarray(LR * grad, dtype=jnp.float32)
+        best_index = int(np.argmax(returns_np))
+        elite_params = jnp.asarray(np.asarray(params_batch[best_index], dtype=np.float32), dtype=jnp.float32)
+        self._params = elite_params
 
         self.state.generation += 1
         self.state.mean_reward = float(returns_np.mean())
         self.state.best_reward = max(self.state.best_reward, float(returns_np.max()))
-        self.state.episode_reward = float(returns_np[0]) if returns_np.size else 0.0
+        self.state.episode_reward = float(returns_np[best_index]) if returns_np.size else 0.0
         self.state.rewards_history.append(self.state.mean_reward)
 
         if on_gen_done is not None:

@@ -13,12 +13,12 @@ from pathlib import Path
 import ai.jax_trainer as trainer_module
 from ai.trainer import ESTrainer
 
-GPU_DEFAULT_POP_SIZE = 128
+GPU_DEFAULT_POP_SIZE = 256
 
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run headless quadruped training and save checkpoints.")
-    parser.add_argument("--generations", type=int, default=100, help="Number of generations to train.")
+    parser.add_argument("--generations", type=int, default=10000, help="Number of generations to train.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for trainer initialization.")
     parser.add_argument(
         "--out-dir",
@@ -30,7 +30,7 @@ def _parse_args() -> argparse.Namespace:
         "--save-every",
         type=int,
         default=5,
-        help="Write a generation checkpoint every N generations.",
+        help="Retained for CLI compatibility; numbered generation checkpoints are no longer written.",
     )
     parser.add_argument(
         "--resume",
@@ -113,7 +113,7 @@ def main() -> int:
         _log("Warning: step progress logging is enabled and will reduce training throughput substantially.")
     _log(
         f"Config: episode_s={trainer_module.EPISODE_S}  pop_size={trainer_module.POP_SIZE}  "
-        f"save_every={args.save_every}"
+        f"checkpoints=latest,best"
     )
     previous_best = trainer.state.best_reward
 
@@ -141,9 +141,6 @@ def main() -> int:
         elapsed_s = time.perf_counter() - generation_start_s
 
         _save_checkpoint(latest_path, "latest")
-        should_save_generation = args.save_every > 0 and trainer.state.generation % args.save_every == 0
-        if should_save_generation:
-            _save_checkpoint(args.out_dir / f"generation_{trainer.state.generation:06d}.npz", "generation")
 
         if trainer.state.best_reward > previous_best:
             _save_checkpoint(best_path, "best")
@@ -152,6 +149,7 @@ def main() -> int:
         _log(
             f"gen={trainer.state.generation:6d}  "
             f"mean_reward={trainer.state.mean_reward:10.3f}  "
+            f"elite_reward={trainer.state.episode_reward:10.3f}  "
             f"best_reward={trainer.state.best_reward:10.3f}  "
             f"elapsed={elapsed_s:7.2f}s"
         )

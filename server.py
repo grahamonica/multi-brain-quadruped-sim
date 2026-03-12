@@ -19,6 +19,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 PROJECT_DIR = str(Path(__file__).parent.resolve())
+GPU_DEFAULT_POP_SIZE = 256
 
 # ── Globals ────────────────────────────────────────────────────────────────────
 _mp_queue: mp.Queue | None = None
@@ -35,9 +36,12 @@ def _training_process(queue: mp.Queue, seed: int, project_dir: str) -> None:
         sys.path.insert(0, project_dir)
     os.chdir(project_dir)
 
+    import ai.jax_trainer as trainer_module
     from ai.trainer import ESTrainer
 
     trainer = ESTrainer(seed=seed)
+    if getattr(trainer, "backend", "unknown") == "gpu" and trainer_module.POP_SIZE < GPU_DEFAULT_POP_SIZE:
+        trainer_module.POP_SIZE = GPU_DEFAULT_POP_SIZE
 
     def _put(msg: dict[str, Any]) -> None:
         try:
