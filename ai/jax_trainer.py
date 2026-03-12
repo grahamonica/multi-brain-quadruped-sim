@@ -43,7 +43,7 @@ BRAIN_DT = 0.050
 MOTOR_SCALE = 6.0
 GOAL_HEIGHT_M = 0.16
 FIELD_HALF = 15.0
-POP_SIZE = 256
+POP_SIZE = 32
 SIGMA = 0.05
 LR = 0.05
 PARENT_ELITE_COUNT = 5
@@ -727,9 +727,11 @@ def _episode_step(params: dict[str, jax.Array], carry: EpisodeCarry, goal_xyz: j
         * (target_noise_scale - carry.noise_scale)
     )
 
-    distance_scale = jnp.maximum(carry.initial_dist, jnp.float32(0.5))
-    normalized_progress = (carry.prev_dist - dist) / distance_scale
-    reward = normalized_progress * PROGRESS_REWARD_SCALE
+    # reward is proportional to the absolute reduction in horizontal distance
+    # from the previous step.  using carry.prev_dist directly ensures that
+    # starting close to the goal does not inflate the score.
+    progress = carry.prev_dist - dist
+    reward = progress * PROGRESS_REWARD_SCALE
     reached_goal_now = (~carry.goal_reached) & (dist <= GOAL_REACHED_RADIUS_M)
     reward = reward + jnp.where(reached_goal_now, GOAL_REACHED_BONUS, 0.0)
 
