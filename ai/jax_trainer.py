@@ -43,9 +43,10 @@ BRAIN_DT = 0.050
 MOTOR_SCALE = 6.0
 GOAL_HEIGHT_M = 0.16
 FIELD_HALF = 15.0
-POP_SIZE = 200
+POP_SIZE = 256
 SIGMA = 0.05
 LR = 0.05
+PARENT_ELITE_COUNT = 5
 MAX_MOTOR_RAD_S = 8.0
 MAX_MOTOR_NOISE_SCALE = 1.20
 FAST_PROGRESS_TAU_S = 0.20
@@ -163,6 +164,7 @@ class EpisodeCarry(NamedTuple):
 class TrainingState:
     generation: int = 0
     best_reward: float = -1e9
+    best_single_reward: float = -1e9
     mean_reward: float = 0.0
     episode_reward: float = 0.0
     goal_xyz: tuple[float, float, float] = (1.0, 0.0, GOAL_HEIGHT_M)
@@ -858,6 +860,9 @@ class JaxESTrainer:
         self._key = jax.random.PRNGKey(seed)
         self._key, init_key = jax.random.split(self._key)
         self._params = _init_param_vector(init_key)
+        self._top_params = np.zeros((0, PARAM_COUNT), dtype=np.float32)
+        self._top_rewards = np.zeros((0,), dtype=np.float32)
+        self._top_indices = np.zeros((0,), dtype=np.int32)
 
     @property
     def backend(self) -> str:
@@ -870,6 +875,18 @@ class JaxESTrainer:
     @property
     def param_count(self) -> int:
         return PARAM_COUNT
+
+    @property
+    def top_params(self) -> np.ndarray:
+        return self._top_params.copy()
+
+    @property
+    def top_rewards(self) -> np.ndarray:
+        return self._top_rewards.copy()
+
+    @property
+    def top_indices(self) -> np.ndarray:
+        return self._top_indices.copy()
 
     def _random_goal(self) -> jax.Array:
         self._key, angle_key, radius_key = jax.random.split(self._key, 3)
@@ -892,36 +909,35 @@ class JaxESTrainer:
         goal_xyz = self._random_goal()
         self.state.goal_xyz = tuple(float(v) for v in np.asarray(goal_xyz).tolist())
 
-        self._key, noise_key, eval_key = jax.random.split(self._key, 3)
+        self._key, noise_key, eval_key, display_key = jax.random.split(self._key, 4)
         noise = jax.random.normal(noise_key, (POP_SIZE, PARAM_COUNT), dtype=jnp.float32) * jnp.float32(SIGMA)
         params_batch = self._params[None, :] + noise
         eval_keys = jax.random.split(eval_key, POP_SIZE)
 
         if on_step is not None:
-            first_return = self._run_logged_episode(params_batch[0], goal_xyz, eval_keys[0], on_step)
-            if POP_SIZE > 1:
-                other_returns = _run_episode_batch_flat(params_batch[1:], goal_xyz, eval_keys[1:], int(EPISODE_S / BRAIN_DT))
-                returns = jnp.concatenate([jnp.array([first_return], dtype=jnp.float32), other_returns], axis=0)
-            else:
-                returns = jnp.array([first_return], dtype=jnp.float32)
-        else:
-            returns = _run_episode_batch_flat(params_batch, goal_xyz, eval_keys, int(EPISODE_S / BRAIN_DT))
+            self._run_logged_episode(self._params, goal_xyz, display_key, on_step)
+
+        returns = _run_episode_batch_flat(params_batch, goal_xyz, eval_keys, int(EPISODE_S / BRAIN_DT))
 
         returns_np = np.asarray(returns, dtype=np.float32)
-        std = float(returns_np.std())
-        if std > 1e-6:
-            normalized = (returns_np - returns_np.mean()) / std
-        else:
-            normalized = np.zeros_like(returns_np)
-
-        best_index = int(np.argmax(returns_np))
-        elite_params = jnp.asarray(np.asarray(params_batch[best_index], dtype=np.float32), dtype=jnp.float32)
-        self._params = elite_params
+        elite_count = min(PARENT_ELITE_COUNT, returns_np.shape[0])
+        top_indices = np.argpartition(returns_np, -elite_count)[-elite_count:]
+        top_indices = top_indices[np.argsort(returns_np[top_indices])[::-1]]
+        top_params = np.asarray(jnp.take(params_batch, jnp.asarray(top_indices), axis=0), dtype=np.float32)
+        top_rewards = returns_np[top_indices].astype(np.float32)
+        self._top_params = top_params
+        self._top_rewards = top_rewards
+        self._top_indices = top_indices.astype(np.int32)
+        self._params = jnp.asarray(top_params.mean(axis=0), dtype=jnp.float32)
 
         self.state.generation += 1
         self.state.mean_reward = float(returns_np.mean())
-        self.state.best_reward = max(self.state.best_reward, float(returns_np.max()))
-        self.state.episode_reward = float(returns_np[best_index]) if returns_np.size else 0.0
+        self.state.episode_reward = float(top_rewards.mean()) if top_rewards.size else 0.0
+        self.state.best_reward = max(self.state.best_reward, self.state.episode_reward)
+        self.state.best_single_reward = max(
+            self.state.best_single_reward,
+            float(top_rewards[0]) if top_rewards.size else -1e9,
+        )
         self.state.rewards_history.append(self.state.mean_reward)
 
         if on_gen_done is not None:
@@ -939,8 +955,12 @@ class JaxESTrainer:
     def checkpoint_dict(self) -> dict[str, Any]:
         return {
             "params": np.asarray(self._params, dtype=np.float32),
+            "top_params": self._top_params.astype(np.float32),
+            "top_rewards": self._top_rewards.astype(np.float32),
+            "top_indices": self._top_indices.astype(np.int32),
             "generation": np.int32(self.state.generation),
             "best_reward": np.float32(self.state.best_reward),
+            "best_single_reward": np.float32(self.state.best_single_reward),
             "mean_reward": np.float32(self.state.mean_reward),
             "episode_reward": np.float32(self.state.episode_reward),
             "goal_xyz": np.asarray(self.state.goal_xyz, dtype=np.float32),
@@ -960,8 +980,16 @@ class JaxESTrainer:
         checkpoint_path = Path(path)
         with np.load(checkpoint_path, allow_pickle=False) as checkpoint:
             self._params = jnp.asarray(checkpoint["params"], dtype=jnp.float32)
+            self._top_params = checkpoint["top_params"].astype(np.float32) if "top_params" in checkpoint.files else np.zeros((0, PARAM_COUNT), dtype=np.float32)
+            self._top_rewards = checkpoint["top_rewards"].astype(np.float32) if "top_rewards" in checkpoint.files else np.zeros((0,), dtype=np.float32)
+            self._top_indices = checkpoint["top_indices"].astype(np.int32) if "top_indices" in checkpoint.files else np.zeros((0,), dtype=np.int32)
             self.state.generation = int(checkpoint["generation"])
             self.state.best_reward = float(checkpoint["best_reward"])
+            self.state.best_single_reward = (
+                float(checkpoint["best_single_reward"])
+                if "best_single_reward" in checkpoint.files
+                else float(checkpoint["best_reward"])
+            )
             self.state.mean_reward = float(checkpoint["mean_reward"])
             self.state.episode_reward = float(checkpoint["episode_reward"])
             self.state.goal_xyz = tuple(float(v) for v in checkpoint["goal_xyz"].tolist())

@@ -10,6 +10,8 @@ import signal
 import time
 from pathlib import Path
 
+import numpy as np
+
 import ai.jax_trainer as trainer_module
 from ai.trainer import ESTrainer
 
@@ -82,6 +84,8 @@ def main() -> int:
 
     latest_path = args.out_dir / "latest.npz"
     best_path = args.out_dir / "best.npz"
+    top_paths = [args.out_dir / f"top_{rank:02d}.npz" for rank in range(1, trainer_module.PARENT_ELITE_COUNT + 1)]
+    best_single_path = args.out_dir / "best_single.npz"
     interrupted = False
 
     def _save_checkpoint(path: Path, label: str) -> Path:
@@ -92,6 +96,35 @@ def main() -> int:
             f"path={saved_path}"
         )
         return saved_path
+
+    def _save_payload(path: Path, label: str, payload: dict) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(path, **payload)
+        _log(
+            f"checkpoint updated: {label:<10} "
+            f"gen={trainer.state.generation:6d}  "
+            f"path={path}"
+        )
+        return path
+
+    def _candidate_payload(rank_index: int) -> dict:
+        payload = trainer.checkpoint_dict()
+        top_params = trainer.top_params
+        top_rewards = trainer.top_rewards
+        top_indices = trainer.top_indices
+        payload["params"] = top_params[rank_index].astype(np.float32)
+        payload["candidate_reward"] = np.float32(top_rewards[rank_index])
+        payload["candidate_rank"] = np.int32(rank_index + 1)
+        payload["candidate_source_index"] = np.int32(top_indices[rank_index])
+        return payload
+
+    def _save_top_ranked() -> None:
+        top_rewards = trainer.top_rewards
+        for rank_index, path in enumerate(top_paths):
+            if rank_index < top_rewards.shape[0]:
+                _save_payload(path, f"top_{rank_index + 1:02d}", _candidate_payload(rank_index))
+            else:
+                path.unlink(missing_ok=True)
 
     def _handle_interrupt(_sig, _frame) -> None:
         nonlocal interrupted
@@ -113,9 +146,10 @@ def main() -> int:
         _log("Warning: step progress logging is enabled and will reduce training throughput substantially.")
     _log(
         f"Config: episode_s={trainer_module.EPISODE_S}  pop_size={trainer_module.POP_SIZE}  "
-        f"checkpoints=latest,best"
+        f"checkpoints=latest,best,best_single,top_01-top_0{trainer_module.PARENT_ELITE_COUNT}"
     )
     previous_best = trainer.state.best_reward
+    previous_best_single = trainer.state.best_single_reward
 
     for _ in range(args.generations):
         if interrupted:
@@ -141,15 +175,19 @@ def main() -> int:
         elapsed_s = time.perf_counter() - generation_start_s
 
         _save_checkpoint(latest_path, "latest")
+        _save_top_ranked()
 
         if trainer.state.best_reward > previous_best:
             _save_checkpoint(best_path, "best")
             previous_best = trainer.state.best_reward
+        if trainer.state.best_single_reward > previous_best_single and trainer.top_rewards.shape[0] > 0:
+            _save_payload(best_single_path, "best_single", _candidate_payload(0))
+            previous_best_single = trainer.state.best_single_reward
 
         _log(
             f"gen={trainer.state.generation:6d}  "
             f"mean_reward={trainer.state.mean_reward:10.3f}  "
-            f"elite_reward={trainer.state.episode_reward:10.3f}  "
+            f"top5_reward={trainer.state.episode_reward:10.3f}  "
             f"best_reward={trainer.state.best_reward:10.3f}  "
             f"elapsed={elapsed_s:7.2f}s"
         )
@@ -160,6 +198,7 @@ def main() -> int:
     _log(f"Training {status} after {trainer.state.generation} generations in {total_elapsed_s:.2f}s")
     _log(f"Latest checkpoint: {latest_path}")
     _log(f"Best checkpoint:   {best_path}")
+    _log(f"Best single:       {best_single_path}")
     if interrupted:
         return 130
     return 0
