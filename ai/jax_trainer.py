@@ -939,7 +939,7 @@ class JaxESTrainer:
         goal_xyz = self._random_goal()
         self.state.goal_xyz = tuple(float(v) for v in np.asarray(goal_xyz).tolist())
 
-        self._key, noise_key, eval_key, display_key = jax.random.split(self._key, 4)
+        self._key, noise_key, eval_key, display_key, center_key = jax.random.split(self._key, 5)
         noise = jax.random.normal(noise_key, (POP_SIZE, PARAM_COUNT), dtype=jnp.float32) * jnp.float32(SIGMA)
         params_batch = self._params[None, :] + noise
         eval_keys = jax.random.split(eval_key, POP_SIZE)
@@ -987,10 +987,14 @@ class JaxESTrainer:
         self._top_indices = combined_indices[leaderboard_indices].astype(np.int32)
         self._top_generations = combined_generations[leaderboard_indices].astype(np.int32)
 
+        # Evaluate the updated center params (no noise) so best_reward tracks the actual center.
+        steps = int(EPISODE_S / BRAIN_DT)
+        center_return = float(np.asarray(_run_episode_flat(self._params, goal_xyz, center_key, steps)))
+
         self.state.generation += 1
         self.state.mean_reward = float(returns_np.mean())
         self.state.episode_reward = float(self._top_rewards.mean()) if self._top_rewards.size else 0.0
-        self.state.best_reward = max(self.state.best_reward, self.state.episode_reward)
+        self.state.best_reward = max(self.state.best_reward, center_return)
         self.state.best_single_reward = max(
             self.state.best_single_reward,
             float(self._top_rewards[0]) if self._top_rewards.size else -1e9,
