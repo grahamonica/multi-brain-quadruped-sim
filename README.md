@@ -11,10 +11,20 @@ Minimal Python quadruped simulation inspired by the KT2 Kungfu Turtle layout.
 - Contact forces at the feet and body corners generate both linear force and tipping torque.
 - If the center of mass moves outside the active support region, the robot can rotate and fall.
 
-## Run
+## Run UI
 
 ```bash
 python3 main.py
 ```
 
-This opens a small Tkinter demo with four motor sliders, a live canvas view, and force telemetry.
+This starts the training server and the React frontend.
+
+## Train Headless
+
+```bash
+./venv/bin/python train_headless.py --backend jax --generations 100 --save-every 5 --episode-seconds 60
+```
+
+This runs the ES trainer without the websocket server or frontend and writes checkpoints to `checkpoints/latest.npz`, `checkpoints/best.npz`, and periodic `checkpoints/generation_*.npz` files.
+
+Use `--progress-every-steps N` to print step-level progress while training, and `--resume checkpoints/latest.npz` to continue from a saved model.

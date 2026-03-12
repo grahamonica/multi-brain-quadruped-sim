@@ -4,10 +4,12 @@ Usage (any python):
     python main.py
 
 Ctrl-C shuts down both processes cleanly.
-Existing processes on ports 8000 and 5173 are killed before starting.
+On the NEXT launch, any leftover processes from the previous run are killed
+via a PID file — this handles force-quits, terminal closures, and SIGKILL.
 """
 from __future__ import annotations
 
+import atexit
 import os
 import signal
 import subprocess
@@ -17,18 +19,46 @@ from pathlib import Path
 
 PROJECT = Path(__file__).parent.resolve()
 FRONTEND = PROJECT / "frontend"
+PID_FILE = PROJECT / ".server_pids"
 
 # Use python3.13 (which has uvicorn/fastapi/numpy installed system-wide).
-# Fall back to the current interpreter if python3.13 isn't on PATH.
 _PY = "python3.13" if subprocess.run(
     ["python3.13", "--version"], capture_output=True
 ).returncode == 0 else sys.executable
 
 
-def _kill_port(port: int) -> None:
-    """Kill any process currently listening on the given port."""
+# ── PID-file helpers ───────────────────────────────────────────────────────────
+
+def _save_pids(*pids: int) -> None:
+    PID_FILE.write_text("\n".join(str(p) for p in pids if p))
+
+
+def _kill_from_pid_file() -> None:
+    """Kill any processes recorded from the previous run."""
+    if not PID_FILE.exists():
+        return
+    pids = PID_FILE.read_text().split()
+    killed = 0
+    for pid_str in pids:
+        try:
+            pid = int(pid_str)
+            # Kill the process and all its children
+            subprocess.run(["pkill", "-KILL", "-P", str(pid)],
+                           capture_output=True)
+            os.kill(pid, signal.SIGKILL)
+            killed += 1
+        except (ProcessLookupError, ValueError, OSError):
+            pass
+    PID_FILE.unlink(missing_ok=True)
+    if killed:
+        print(f"  cleaned up {killed} process(es) from previous run")
+        time.sleep(0.4)
+
+
+def _kill_orphan_trainers() -> None:
+    """Kill any lingering multiprocessing training children by name."""
     result = subprocess.run(
-        ["lsof", "-ti", f":{port}"],
+        ["pgrep", "-f", "multiprocessing.spawn import spawn_main"],
         capture_output=True, text=True,
     )
     pids = result.stdout.strip().split()
@@ -38,8 +68,25 @@ def _kill_port(port: int) -> None:
         except (ProcessLookupError, ValueError):
             pass
     if pids:
-        time.sleep(0.5)  # let the OS reclaim the port
+        print(f"  killed {len(pids)} orphaned training process(es)")
+        time.sleep(0.3)
 
+
+def _kill_port(port: int) -> None:
+    result = subprocess.run(
+        ["lsof", "-ti", f":{port}"], capture_output=True, text=True,
+    )
+    pids = result.stdout.strip().split()
+    for pid in pids:
+        try:
+            os.kill(int(pid), signal.SIGKILL)
+        except (ProcessLookupError, ValueError):
+            pass
+    if pids:
+        time.sleep(0.5)
+
+
+# ── Process launchers ──────────────────────────────────────────────────────────
 
 def _start_server() -> subprocess.Popen:
     return subprocess.Popen(
@@ -56,22 +103,36 @@ def _start_frontend() -> subprocess.Popen:
     )
 
 
+# ── Main ───────────────────────────────────────────────────────────────────────
+
 def main() -> None:
-    print("Clearing ports 8000 and 5173…")
+    print("Clearing previous run…")
+    _kill_from_pid_file()
+    _kill_orphan_trainers()
     _kill_port(8000)
     _kill_port(5173)
 
     procs: list[subprocess.Popen] = []
 
-    def _shutdown(sig, frame):
+    def _shutdown(sig=None, frame=None) -> None:
         print("\nShutting down…")
         for p in procs:
             try:
                 p.terminate()
             except Exception:
                 pass
+        time.sleep(1)
+        for p in procs:
+            try:
+                if p.poll() is None:
+                    p.kill()
+            except Exception:
+                pass
+        _kill_orphan_trainers()
+        PID_FILE.unlink(missing_ok=True)
         sys.exit(0)
 
+    atexit.register(_shutdown)
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
@@ -82,6 +143,9 @@ def main() -> None:
     frontend = _start_frontend()
     procs.append(frontend)
 
+    # Record PIDs so the next launch can clean them up even after a force-quit
+    _save_pids(server.pid, frontend.pid)
+
     print(f"Python          : {_PY}")
     print("Training server : http://localhost:8000")
     print("Frontend        : http://localhost:5173")
@@ -91,7 +155,7 @@ def main() -> None:
         for p in procs:
             if p.poll() is not None:
                 print(f"Process {p.args[0]} exited with code {p.returncode}")
-                _shutdown(None, None)
+                _shutdown()
         time.sleep(1)
 
 

@@ -164,9 +164,12 @@ class QuadrupedEnvironment:
                 tangential_anchor_xy_m=(point[0], point[1]),
             )
 
-        self.body_contact_forces_xyz_n = []
         self.time_s = 0.0
-        self._update_imu_and_force_state({}, [])
+        leg_kinematics = self._compute_leg_kinematics()
+        leg_contacts = self._compute_leg_contacts_from_kinematics(leg_kinematics)
+        body_contacts = self._compute_body_contacts()
+        self.body_contact_forces_xyz_n = [contact["force"] for contact in body_contacts]
+        self._update_imu_and_force_state(leg_contacts, body_contacts)
 
     def advance(self, dt_s: float) -> None:
         if dt_s <= 0.0:

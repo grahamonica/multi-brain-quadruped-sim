@@ -17,10 +17,10 @@ class Quadruped:
         *,
         body_length_m: float = 0.28,
         body_width_m: float = 0.12,
-        body_height_m: float = 0.08,
-        body_mass_kg: float = 1.8,
+        body_height_m: float = 0.02,
+        body_mass_kg: float = 2.4,
         leg_length_m: float = 0.16,
-        leg_mass_kg: float = 0.45,
+        leg_mass_kg: float = 0.6,
         foot_static_friction: float = 0.9,
         foot_kinetic_friction: float = 0.65,
     ) -> "Quadruped":
