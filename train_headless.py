@@ -13,6 +13,8 @@ from pathlib import Path
 import ai.jax_trainer as trainer_module
 from ai.trainer import ESTrainer
 
+GPU_DEFAULT_POP_SIZE = 128
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run headless quadruped training and save checkpoints.")
@@ -71,6 +73,8 @@ def main() -> int:
         trainer_module.POP_SIZE = args.population_size
 
     trainer = ESTrainer(seed=args.seed)
+    if args.population_size is None and getattr(trainer, "backend", "unknown") == "gpu" and trainer_module.POP_SIZE < GPU_DEFAULT_POP_SIZE:
+        trainer_module.POP_SIZE = GPU_DEFAULT_POP_SIZE
 
     if args.resume is not None:
         trainer.load_checkpoint(args.resume)
@@ -101,6 +105,12 @@ def main() -> int:
     _log(f"Backend: {backend_description}. No frontend or rendering is started.")
     if hasattr(trainer, "device_summary"):
         _log(f"Devices: {trainer.device_summary}")
+    if getattr(trainer, "backend", "unknown") != "gpu":
+        _log("Warning: JAX is not using a GPU. This run will not use Nvidia acceleration.")
+    elif args.population_size is None:
+        _log(f"GPU detected. Using larger default population size {trainer_module.POP_SIZE} for better device utilization.")
+    if args.progress_every_steps > 0:
+        _log("Warning: step progress logging is enabled and will reduce training throughput substantially.")
     _log(
         f"Config: episode_s={trainer_module.EPISODE_S}  pop_size={trainer_module.POP_SIZE}  "
         f"save_every={args.save_every}"

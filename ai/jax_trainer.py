@@ -38,7 +38,7 @@ DT = 0.010
 TRACE_DECAY = 0.70
 DEFAULT_MOTOR_NOISE_SCALE = 0.60
 
-EPISODE_S = 3000.0
+EPISODE_S = 60.0
 BRAIN_DT = 0.050
 MOTOR_SCALE = 6.0
 GOAL_HEIGHT_M = 0.16
@@ -59,6 +59,10 @@ LONG_THIN_SIDE_STUCK_DELAY_S = 1.0
 LONG_THIN_SIDE_PENALTY_PER_S = 3.0
 STUCK_IMU_ROLL_CHANGE_REWARD_PER_RAD = 3.5
 SELF_RIGHT_EXIT_BONUS = 4.0
+STUCK_ENTRY_PENALTY = 4.0
+PROGRESS_REWARD_SCALE = 25.0
+GOAL_REACHED_RADIUS_M = 0.25
+GOAL_REACHED_BONUS = 25.0
 
 GRAVITY_M_S2 = 9.81
 FLOOR_HEIGHT_M = 0.0
@@ -147,6 +151,7 @@ class EpisodeCarry(NamedTuple):
     brain_state: BrainState
     key: jax.Array
     total_reward: jax.Array
+    initial_dist: jax.Array
     prev_dist: jax.Array
     noise_scale: jax.Array
     fast_closing_rate: jax.Array
@@ -155,6 +160,7 @@ class EpisodeCarry(NamedTuple):
     progress_drop_ratio: jax.Array
     long_thin_side_dwell_s: jax.Array
     long_thin_side_stuck: jax.Array
+    goal_reached: jax.Array
     prev_imu_roll_rad: jax.Array
 
 
@@ -667,13 +673,14 @@ def _build_obs(state: EnvState, goal_xyz: jax.Array) -> jax.Array:
 def _episode_init(goal_xyz: jax.Array, key: jax.Array) -> EpisodeCarry:
     env_state = _env_reset()
     com = _center_of_mass(env_state)
-    prev_dist = jnp.linalg.norm(com[:2] - goal_xyz[:2])
+    initial_dist = jnp.linalg.norm(com[:2] - goal_xyz[:2])
     return EpisodeCarry(
         env_state=env_state,
         brain_state=_brain_zero_state(),
         key=key,
         total_reward=jnp.float32(0.0),
-        prev_dist=prev_dist,
+        initial_dist=initial_dist,
+        prev_dist=initial_dist,
         noise_scale=jnp.float32(DEFAULT_MOTOR_NOISE_SCALE),
         fast_closing_rate=jnp.float32(0.0),
         slow_closing_rate=jnp.float32(0.0),
@@ -681,6 +688,7 @@ def _episode_init(goal_xyz: jax.Array, key: jax.Array) -> EpisodeCarry:
         progress_drop_ratio=jnp.float32(0.0),
         long_thin_side_dwell_s=jnp.float32(0.0),
         long_thin_side_stuck=jnp.array(False),
+        goal_reached=jnp.array(False),
         prev_imu_roll_rad=_wrap_angle_pi(env_state.body_rot[0]),
     )
 
@@ -716,14 +724,19 @@ def _episode_step(params: dict[str, jax.Array], carry: EpisodeCarry, goal_xyz: j
         * (target_noise_scale - carry.noise_scale)
     )
 
-    reward = -dist
-    reward = reward + ((carry.prev_dist - dist) * 5.0)
+    distance_scale = jnp.maximum(carry.initial_dist, jnp.float32(0.5))
+    normalized_progress = (carry.prev_dist - dist) / distance_scale
+    reward = normalized_progress * PROGRESS_REWARD_SCALE
+    reached_goal_now = (~carry.goal_reached) & (dist <= GOAL_REACHED_RADIUS_M)
+    reward = reward + jnp.where(reached_goal_now, GOAL_REACHED_BONUS, 0.0)
 
     imu_roll_rad = _wrap_angle_pi(env_state.body_rot[0])
     abs_roll_rad = jnp.abs(imu_roll_rad)
     on_long_thin_side = (abs_roll_rad >= LONG_THIN_SIDE_ROLL_MIN_RAD) & (abs_roll_rad <= LONG_THIN_SIDE_ROLL_MAX_RAD)
     long_thin_side_dwell_s = jnp.where(on_long_thin_side, carry.long_thin_side_dwell_s + BRAIN_DT, 0.0)
     long_thin_side_stuck = carry.long_thin_side_stuck | (long_thin_side_dwell_s >= LONG_THIN_SIDE_STUCK_DELAY_S)
+    entered_stuck_side = (~carry.long_thin_side_stuck) & long_thin_side_stuck
+    reward = reward - jnp.where(entered_stuck_side, STUCK_ENTRY_PENALTY, 0.0)
     reward = reward - jnp.where(long_thin_side_stuck, LONG_THIN_SIDE_PENALTY_PER_S * BRAIN_DT, 0.0)
     imu_roll_delta_rad = jnp.abs(_wrap_angle_pi(imu_roll_rad - carry.prev_imu_roll_rad))
     reward = reward + jnp.where(long_thin_side_stuck, imu_roll_delta_rad * STUCK_IMU_ROLL_CHANGE_REWARD_PER_RAD, 0.0)
@@ -737,6 +750,7 @@ def _episode_step(params: dict[str, jax.Array], carry: EpisodeCarry, goal_xyz: j
         brain_state=brain_state,
         key=key,
         total_reward=carry.total_reward + reward,
+        initial_dist=carry.initial_dist,
         prev_dist=dist,
         noise_scale=noise_scale,
         fast_closing_rate=fast_closing_rate,
@@ -745,6 +759,7 @@ def _episode_step(params: dict[str, jax.Array], carry: EpisodeCarry, goal_xyz: j
         progress_drop_ratio=progress_drop_ratio,
         long_thin_side_dwell_s=long_thin_side_dwell_s,
         long_thin_side_stuck=long_thin_side_stuck,
+        goal_reached=carry.goal_reached | reached_goal_now,
         prev_imu_roll_rad=imu_roll_rad,
     )
 
