@@ -950,6 +950,17 @@ class JaxESTrainer:
         returns = _run_episode_batch_flat(params_batch, goal_xyz, eval_keys, int(EPISODE_S / BRAIN_DT))
 
         returns_np = np.asarray(returns, dtype=np.float32)
+
+        # Proper OpenAI ES gradient update using the full population.
+        returns_std = returns_np.std()
+        if returns_std > 1e-8:
+            normalized_returns = (returns_np - returns_np.mean()) / returns_std
+        else:
+            normalized_returns = returns_np - returns_np.mean()
+        noise_np = np.asarray(noise, dtype=np.float32)
+        gradient = (normalized_returns[:, None] * noise_np).sum(axis=0) / (POP_SIZE * SIGMA)
+        self._params = self._params + jnp.float32(LR) * jnp.asarray(gradient, dtype=jnp.float32)
+
         elite_count = min(PARENT_ELITE_COUNT, returns_np.shape[0])
         top_indices = np.argpartition(returns_np, -elite_count)[-elite_count:]
         top_indices = top_indices[np.argsort(returns_np[top_indices])[::-1]]
@@ -975,7 +986,6 @@ class JaxESTrainer:
         self._top_rewards = combined_rewards[leaderboard_indices].astype(np.float32)
         self._top_indices = combined_indices[leaderboard_indices].astype(np.int32)
         self._top_generations = combined_generations[leaderboard_indices].astype(np.int32)
-        self._params = jnp.asarray(self._top_params.mean(axis=0), dtype=jnp.float32)
 
         self.state.generation += 1
         self.state.mean_reward = float(returns_np.mean())
