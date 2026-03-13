@@ -32,6 +32,7 @@ _latest_gen: dict[str, Any] = {}
 def _training_process(queue: mp.Queue, seed: int, project_dir: str) -> None:
     """Runs in a child process.  Puts step/generation dicts into queue."""
     import sys
+    from pathlib import Path as _Path
     if project_dir not in sys.path:
         sys.path.insert(0, project_dir)
     os.chdir(project_dir)
@@ -42,6 +43,16 @@ def _training_process(queue: mp.Queue, seed: int, project_dir: str) -> None:
     trainer = ESTrainer(seed=seed)
     if getattr(trainer, "backend", "unknown") == "gpu" and trainer_module.POP_SIZE < GPU_DEFAULT_POP_SIZE:
         trainer_module.POP_SIZE = GPU_DEFAULT_POP_SIZE
+
+    checkpoints_dir = _Path(project_dir) / "checkpoints"
+    latest_path = checkpoints_dir / "latest.npz"
+    best_path = checkpoints_dir / "best.npz"
+    if latest_path.exists():
+        trainer.load_checkpoint(latest_path)
+        print(f"[server] Resumed from {latest_path}  gen={trainer.state.generation}", flush=True)
+    elif best_path.exists():
+        trainer.load_checkpoint(best_path)
+        print(f"[server] Resumed from {best_path}  gen={trainer.state.generation}", flush=True)
 
     def _put(msg: dict[str, Any]) -> None:
         try:

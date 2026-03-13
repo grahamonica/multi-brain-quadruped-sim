@@ -15,7 +15,7 @@ import numpy as np
 import ai.jax_trainer as trainer_module
 from ai.trainer import ESTrainer
 
-GPU_DEFAULT_POP_SIZE = 16
+GPU_DEFAULT_POP_SIZE = 256
 
 
 def _parse_args() -> argparse.Namespace:
@@ -83,6 +83,9 @@ def main() -> int:
     if args.resume is not None:
         trainer.load_checkpoint(args.resume)
         _log(f"Resumed from {args.resume}")
+    elif latest_path.exists():
+        trainer.load_checkpoint(latest_path)
+        _log(f"Auto-resumed from {latest_path}")
     elif (args.out_dir / "best.npz").exists():
         trainer.load_checkpoint(args.out_dir / "best.npz")
         _log(f"Auto-resumed from {args.out_dir / 'best.npz'}")

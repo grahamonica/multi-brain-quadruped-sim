@@ -477,8 +477,10 @@ export default function App() {
         {genInfo ? (
           <>
             <div>generation      <b style={{ color: "#aaffaa" }}>{genInfo.generation}</b></div>
+            {(genInfo.top_rewards || []).map((r, i) => (
+              <div key={i}>top {i + 1} reward    <b style={{ color: "#aaffaa" }}>{r.toFixed(3)}</b></div>
+            ))}
             <div>mean reward     <b style={{ color: "#aaffaa" }}>{genInfo.mean_reward.toFixed(3)}</b></div>
-            <div>best reward     <b style={{ color: "#ffff88" }}>{genInfo.best_reward.toFixed(3)}</b></div>
             <div>goal xyz        <b style={{ color: "#ffcc88" }}>[{genInfo.goal.map(v => v.toFixed(2)).join(", ")}]</b></div>
             <div style={{ marginTop: 10, marginBottom: 4, color: "#556655", fontSize: 10 }}>mean reward / generation</div>
             <RewardChart history={genInfo.rewards_history} />

@@ -15,9 +15,9 @@ import numpy as np
 # Robot / physics constants mirror the current KT2-style defaults.
 N_IN = 48
 N_OUT = 4
-N_HIDDEN_LAYERS = 4
-SHARED_TRUNK_WIDTH = 64
-MOTOR_LANE_WIDTH = 64
+N_HIDDEN_LAYERS = 2
+SHARED_TRUNK_WIDTH = 32
+MOTOR_LANE_WIDTH = 32
 N_LEGS = 4
 N_BODY_CORNERS = 8
 LEG_NAMES = ("front_left", "front_right", "rear_left", "rear_right")
@@ -36,9 +36,9 @@ V_THRESH = 0.01
 V_RESET = 0.0
 DT = 0.010
 TRACE_DECAY = 0.70
-DEFAULT_MOTOR_NOISE_SCALE = 0.60
+DEFAULT_MOTOR_NOISE_SCALE = 0.40
 
-EPISODE_S = 300.0
+EPISODE_S = 60.0
 BRAIN_DT = 0.050
 MOTOR_SCALE = 6.0
 GOAL_HEIGHT_M = 0.16
@@ -1008,6 +1008,7 @@ class JaxESTrainer:
                     "generation": self.state.generation,
                     "mean_reward": self.state.mean_reward,
                     "best_reward": self.state.best_reward,
+                    "top_rewards": self._top_rewards.tolist(),
                     "rewards_history": self.state.rewards_history[-100:],
                     "goal": list(self.state.goal_xyz),
                 }
