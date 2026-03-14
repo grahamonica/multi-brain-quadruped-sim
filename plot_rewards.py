@@ -19,13 +19,15 @@ def main():
         print("No rewards history found in checkpoint.")
         return
 
-    gens = list(range(1, len(history) + 1))
+    history = history[-100:]
+    start_gen = generation - len(history) + 1
+    gens = list(range(start_gen, generation + 1))
 
     plt.figure(figsize=(12, 5))
     plt.plot(gens, history, color="#33cc66", linewidth=1.2)
     plt.xlabel("Generation")
     plt.ylabel("Mean Reward")
-    plt.title(f"Mean Reward over Generations  (gen={generation}, latest={history[-1]:.1f})")
+    plt.title(f"Mean Reward (last 100 gens, gen={generation}, latest={history[-1]:.1f})")
     plt.grid(True, color="#222", linewidth=0.5)
     plt.tight_layout()
     plt.show()

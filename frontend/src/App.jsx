@@ -140,20 +140,21 @@ function RewardChart({ history }) {
   const ref = useRef(null);
   useEffect(() => {
     const c = ref.current;
-    if (!c || history.length < 2) return;
+    const data = history.slice(-100);
+    if (!c || data.length < 2) return;
     const ctx = c.getContext("2d");
     const w = c.width, h = c.height;
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = "#0a120a";
     ctx.fillRect(0, 0, w, h);
-    let min = history[0], max = history[0];
-    for (let i = 1; i < history.length; i++) { if (history[i] < min) min = history[i]; if (history[i] > max) max = history[i]; }
+    let min = data[0], max = data[0];
+    for (let i = 1; i < data.length; i++) { if (data[i] < min) min = data[i]; if (data[i] > max) max = data[i]; }
     const range = max - min || 1;
     ctx.strokeStyle = "#33ff66";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    history.forEach((v, i) => {
-      const px = (i / (history.length - 1)) * w;
+    data.forEach((v, i) => {
+      const px = (i / (data.length - 1)) * w;
       const py = h - ((v - min) / range) * (h - 8) - 4;
       if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
     });
