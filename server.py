@@ -60,8 +60,7 @@ def _training_process(queue: mp.Queue, seed: int, project_dir: str) -> None:
         except Exception:
             pass  # drop if queue full — keeps frontend responsive
 
-    while True:
-        trainer.run_generation(on_step=_put, on_gen_done=_put)
+    trainer.run_continuously(on_swarm_step=_put, on_gen_done=_put)
 
 
 # ── Asyncio broadcast ──────────────────────────────────────────────────────────
