@@ -85,13 +85,23 @@ function drawLegs(ctx, legs, cam, W, H) {
     const [fx, fy] = project(...leg.foot, cam, W, H);
     const [lcx, lcy] = project(...leg.com, cam, W, H);
     ctx.save();
+
+    // Cylindrical leg body with hemispherical foot tip.
+    // lineCap="round" draws a semicircular cap at the foot end — that IS the hemisphere.
+    // The cap radius = lineWidth/2 = 4px, matching the cylinder cross-section.
     ctx.strokeStyle = color;
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 8;
+    ctx.lineCap = "round";
     ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(fx, fy); ctx.stroke();
-    ctx.fillStyle = color;
-    ctx.beginPath(); ctx.arc(fx, fy, 5, 0, Math.PI * 2); ctx.fill();
+
+    // Subtle specular highlight on the foot dome
+    ctx.fillStyle = "#ffffff28";
+    ctx.beginPath(); ctx.arc(fx - 1, fy - 1, 2, 0, Math.PI * 2); ctx.fill();
+
+    // Centroid marker
     ctx.fillStyle = "#ffffff55";
     ctx.beginPath(); ctx.arc(lcx, lcy, 3, 0, Math.PI * 2); ctx.fill();
+
     ctx.restore();
   });
 }
