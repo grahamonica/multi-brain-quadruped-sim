@@ -14,11 +14,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import ai.jax_trainer as trainer_module
-from ai.config import RuntimeSpec, load_runtime_spec
-from ai.sim.jax_backend import JaxSimBackend
-from ai.sim.mujoco_backend import MuJoCoBackend
-from ai.sim.translators import terrain_height_at
+import brains.jax_trainer as trainer_module
+from brains.config import RuntimeSpec, load_runtime_spec
+from brains.sim.jax_backend import JaxSimBackend
+from brains.sim.mujoco_backend import MuJoCoBackend
+from brains.sim.translators import terrain_height_at
 
 
 @dataclass(frozen=True)

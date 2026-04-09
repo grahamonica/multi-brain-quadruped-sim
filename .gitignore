@@ -13,6 +13,8 @@ env/
 # Environment variables
 .env
 .env.*
+!.env.example
+!.env.*.example
 
 # Node
 frontend/node_modules/
@@ -27,5 +29,6 @@ frontend/dist/
 # Runtime state
 .server_pids
 .single_pids
+checkpoints/
 logs/
 tracker.md

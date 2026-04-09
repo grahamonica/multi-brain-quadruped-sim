@@ -41,6 +41,24 @@ def _merge_section(default_value: Any, override: Any) -> Any:
 
 
 @dataclass(frozen=True)
+class ModelSpec:
+    type: str = "shared_trunk_es"
+    architecture: str = "shared_trunk_motor_lanes"
+    trainer: str = "openai_es"
+    description: str = "Current JAX policy vector with shared trunk and per-motor lanes."
+
+    def validate(self) -> None:
+        if not self.type:
+            raise ValueError("model.type must be non-empty.")
+        if not all(ch.isalnum() or ch in {"_", "-", "."} for ch in self.type):
+            raise ValueError("model.type may only contain letters, numbers, underscores, hyphens, and periods.")
+        if not self.architecture:
+            raise ValueError("model.architecture must be non-empty.")
+        if self.trainer != "openai_es":
+            raise ValueError("model.trainer must be 'openai_es' for the current registered model.")
+
+
+@dataclass(frozen=True)
 class TerrainSpec:
     kind: str = "stepped_arena"
     field_half_m: float = 15.0
@@ -431,6 +449,7 @@ class LoggingSpec:
 @dataclass(frozen=True)
 class RuntimeSpec:
     name: str = "default"
+    model: ModelSpec = field(default_factory=ModelSpec)
     simulator: SimulatorSpec = field(default_factory=SimulatorSpec)
     terrain: TerrainSpec = field(default_factory=TerrainSpec)
     goals: GoalSpec = field(default_factory=GoalSpec)
@@ -447,6 +466,7 @@ class RuntimeSpec:
     def validate(self) -> None:
         if not self.name:
             raise ValueError("config.name must be non-empty.")
+        self.model.validate()
         self.simulator.validate()
         self.terrain.validate()
         self.goals.validate()
@@ -477,6 +497,12 @@ def runtime_spec_from_dict(raw_data: Mapping[str, Any] | None) -> RuntimeSpec:
 
     spec = RuntimeSpec(
         name=str(data["name"]),
+        model=ModelSpec(
+            type=str(data["model"]["type"]),
+            architecture=str(data["model"]["architecture"]),
+            trainer=str(data["model"]["trainer"]),
+            description=str(data["model"].get("description", "")),
+        ),
         simulator=SimulatorSpec(
             backend=simulator_backend,
             render=bool(data["simulator"]["render"]),

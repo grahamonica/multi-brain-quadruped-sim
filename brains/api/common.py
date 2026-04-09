@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 from fastapi import WebSocket
 
-from ai.config import RuntimeSpec
-from ai.runtime import CheckpointCompatibility, checkpoint_matches_spec
+from brains.config import RuntimeSpec
+from brains.models import list_model_definitions
 from quadruped import QuadrupedRobot, SimulationEnvironment
-from ai.sim import single_step_to_viewer_frame as translate_single_step_to_viewer_frame
+from brains.sim import single_step_to_viewer_frame as translate_single_step_to_viewer_frame
 
 
 VIEWER_RESET_SECONDS = 30.0
@@ -25,6 +24,7 @@ class ViewerMetadata:
     config_name: str
     terrain: dict[str, Any]
     robot: dict[str, Any]
+    model: dict[str, Any]
     goal: dict[str, Any]
     training: dict[str, Any]
     simulator: dict[str, Any]
@@ -36,6 +36,7 @@ class ViewerMetadata:
             "config_name": self.config_name,
             "terrain": self.terrain,
             "robot": self.robot,
+            "model": self.model,
             "goal": self.goal,
             "training": self.training,
             "simulator": self.simulator,
@@ -97,6 +98,10 @@ def build_viewer_metadata(spec: RuntimeSpec, mode: str) -> ViewerMetadata:
         "body_width_m": robot_model.body.width_m,
         "body_height_m": robot_model.body.height_m,
         "leg_length_m": robot_model.legs[0].length_m,
+        "leg_radius_m": robot_model.legs[0].radius_m,
+        "foot_radius_m": robot_model.legs[0].foot_radius_m,
+        "mount_points_body": [list(leg.mount_point_body) for leg in robot_model.legs],
+        "rotation_axes_body": [list(leg.rotation_axis_body) for leg in robot_model.legs],
         "leg_names": list(robot_model.leg_names),
     }
     goal = {
@@ -105,11 +110,19 @@ def build_viewer_metadata(spec: RuntimeSpec, mode: str) -> ViewerMetadata:
         "height_m": environment_model.task.goal_height_m,
         "fixed_goal_xyz": list(environment_model.task.fixed_goal_xyz) if environment_model.task.fixed_goal_xyz is not None else None,
     }
+    model = {
+        "active": spec.model.type,
+        "architecture": spec.model.architecture,
+        "trainer": spec.model.trainer,
+        "description": spec.model.description,
+        "registered": [definition.to_dict() for definition in list_model_definitions()],
+    }
     training = {
         "population_size": environment_model.training.population_size,
         "episode_s": environment_model.episode.episode_s,
         "selection_interval_s": environment_model.episode.selection_interval_s,
         "viewer_reset_s": VIEWER_RESET_SECONDS,
+        "brain_dt_s": environment_model.episode.brain_dt_s,
     }
     simulator = {
         "backend": spec.simulator.backend,
@@ -121,6 +134,7 @@ def build_viewer_metadata(spec: RuntimeSpec, mode: str) -> ViewerMetadata:
         config_name=spec.name,
         terrain=terrain,
         robot=robot,
+        model=model,
         goal=goal,
         training=training,
         simulator=simulator,
@@ -133,31 +147,6 @@ def viewer_reset_steps(spec: RuntimeSpec) -> int:
 
 def current_policy_params(trainer: Any) -> np.ndarray:
     return np.asarray(trainer.params, dtype=np.float32)
-
-
-def load_first_compatible_checkpoint(
-    trainer: Any,
-    spec: RuntimeSpec,
-    candidates: tuple[Path, ...],
-) -> tuple[Path | None, tuple[CheckpointCompatibility, ...]]:
-    skipped: list[CheckpointCompatibility] = []
-    for path in candidates:
-        compatibility = checkpoint_matches_spec(path, spec)
-        if not compatibility.compatible:
-            skipped.append(compatibility)
-            continue
-        try:
-            trainer.load_checkpoint(path)
-            return path, tuple(skipped)
-        except Exception as exc:
-            skipped.append(
-                CheckpointCompatibility(
-                    path=path,
-                    compatible=False,
-                    reason=str(exc),
-                )
-            )
-    return None, tuple(skipped)
 
 
 def single_step_to_frame(step_message: dict[str, Any], generation: int, spec: RuntimeSpec) -> dict[str, Any]:

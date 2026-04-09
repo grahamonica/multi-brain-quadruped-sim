@@ -10,11 +10,12 @@ from .io import (
     load_runtime_spec,
     save_runtime_spec,
 )
-from .schema import DEFAULT_SPEC, RuntimeSpec, runtime_spec_from_dict
+from .schema import DEFAULT_SPEC, ModelSpec, RuntimeSpec, runtime_spec_from_dict
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
     "DEFAULT_SPEC",
+    "ModelSpec",
     "RuntimeSpec",
     "backend_agnostic_config_dict",
     "canonical_backend_agnostic_config_json",

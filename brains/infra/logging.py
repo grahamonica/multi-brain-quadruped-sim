@@ -9,11 +9,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ai.config import RuntimeSpec, canonical_config_json, save_runtime_spec
+from brains.config import RuntimeSpec, canonical_config_json, save_runtime_spec
 
 
 class JsonLineFormatter(logging.Formatter):
-    """Simple JSONL formatter for machine-readable logs."""
+    """Simple JSONL formatter for machine-readable run logs."""
 
     def format(self, record: logging.LogRecord) -> str:
         payload = {

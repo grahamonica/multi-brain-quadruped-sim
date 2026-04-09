@@ -12,8 +12,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ai.config import RuntimeSpec, canonical_config_json, config_json_matches_checkpoint, default_runtime_spec
-from ai.sim.mujoco_backend import MuJoCoBackend
+from brains.config import RuntimeSpec, canonical_config_json, config_json_matches_checkpoint, default_runtime_spec
+from brains.models import get_model_definition
+from brains.sim.mujoco_backend import MuJoCoBackend
 from quadruped import LEG_ROTATION_AXIS_BODY, QuadrupedRobot, SimulationEnvironment
 
 
@@ -1229,8 +1230,23 @@ def _step_snapshot(carry: EpisodeCarry, goal_xyz: jax.Array, step: int, total_st
 class ESTrainer:
     """Single ES trainer that keeps optimization in JAX and swaps only the rollout backend."""
 
-    def __init__(self, seed: int = 42, spec: RuntimeSpec | None = None) -> None:
+    def __init__(
+        self,
+        seed: int = 42,
+        spec: RuntimeSpec | None = None,
+        *,
+        model_id: str | None = None,
+        log_id: str | None = None,
+    ) -> None:
         self.spec = apply_runtime_spec(spec or current_runtime_spec())
+        self.model_definition = get_model_definition(self.spec.model.type)
+        if self.model_definition.parameter_count != PARAM_COUNT:
+            raise ValueError(
+                f"Registered model {self.spec.model.type!r} expects {self.model_definition.parameter_count} "
+                f"parameters, but ESTrainer exposes {PARAM_COUNT}."
+            )
+        self.model_id = model_id
+        self.log_id = log_id
         self.seed = seed
         self.state = TrainingState()
         self.state.goal_xyz = (
@@ -1253,7 +1269,7 @@ class ESTrainer:
 
     @property
     def device_summary(self) -> str:
-        return f"MuJoCo {mujoco.__version__} rollout + JAX {jax.default_backend()} policy"
+        return f"{self.spec.model.type} on MuJoCo {mujoco.__version__} rollout + JAX {jax.default_backend()} policy"
 
     @property
     def param_count(self) -> int:
@@ -1439,6 +1455,11 @@ class ESTrainer:
             "seed": np.int32(self.seed),
             "backend": np.array(self.backend),
             "compute_backend": np.array(jax.default_backend()),
+            "model_type": np.array(self.spec.model.type),
+            "model_architecture": np.array(self.spec.model.architecture),
+            "model_trainer": np.array(self.spec.model.trainer),
+            "model_id": np.array(self.model_id or ""),
+            "log_id": np.array(self.log_id or ""),
             "config_json": np.array(canonical_config_json(self.spec)),
             "config_name": np.array(self.spec.name),
             "simulator_backend": np.array(self.spec.simulator.backend),
@@ -1460,6 +1481,8 @@ class ESTrainer:
                         "Checkpoint config does not match the active runtime spec aside from backend selection. "
                         "Use a compatible config file to resume training."
                     )
+            elif "model_type" in checkpoint.files and str(checkpoint["model_type"].item()) != self.spec.model.type:
+                raise ValueError("Checkpoint model_type does not match the active runtime spec.")
             params = checkpoint["params"]
             if params.shape != (PARAM_COUNT,):
                 raise ValueError(
@@ -1497,6 +1520,12 @@ class ESTrainer:
             self.state.goal_xyz = tuple(float(v) for v in checkpoint["goal_xyz"].tolist())
             self.state.rewards_history = [float(v) for v in checkpoint["rewards_history"].tolist()]
             self._key = jnp.asarray(checkpoint["rng_key"], dtype=jnp.uint32)
+            if "model_id" in checkpoint.files:
+                checkpoint_model_id = str(checkpoint["model_id"].item())
+                self.model_id = checkpoint_model_id or self.model_id
+            if "log_id" in checkpoint.files:
+                checkpoint_log_id = str(checkpoint["log_id"].item())
+                self.log_id = checkpoint_log_id or self.log_id
 
 JaxESTrainer = ESTrainer
 

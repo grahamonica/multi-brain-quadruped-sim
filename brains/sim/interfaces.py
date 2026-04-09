@@ -8,7 +8,7 @@ from typing import Any, Callable, Protocol
 import jax
 import numpy as np
 
-from ai.config import RuntimeSpec
+from brains.config import RuntimeSpec
 
 
 LoggedStepCallback = Callable[[dict[str, Any]], None]

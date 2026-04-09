@@ -8,8 +8,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import ai.jax_trainer as trainer_module
-from ai.config import RuntimeSpec
+import brains.jax_trainer as trainer_module
+from brains.config import RuntimeSpec
 
 from .interfaces import BackendCapabilities, LoggedStepCallback
 
