@@ -21,205 +21,38 @@ const DEFAULT_METADATA = {
   robot: {
     body_length_m: 0.28,
     body_width_m: 0.12,
+    body_height_m: 0.08,
     leg_length_m: 0.16,
+    leg_radius_m: 0.02,
+    foot_radius_m: 0.03,
+  },
+  model: {
+    active: "shared_trunk_es",
+    architecture: "shared_trunk_motor_lanes",
+    trainer: "openai_es",
+    registered: [],
+  },
+  goal: {
+    strategy: "radial_random",
+    radius_m: 3.0,
+    height_m: 0.16,
+    fixed_goal_xyz: null,
   },
   training: {
     population_size: 32,
     episode_s: 30.0,
     selection_interval_s: 15.0,
     viewer_reset_s: 30.0,
+    brain_dt_s: 0.05,
   },
   simulator: {
-    backend: "jax",
+    backend: "unified",
   },
 };
 
-const STEP_COLORS = ["#203423", "#2f6540", "#699249", "#d6a74b", "#db7440", "#d95066"];
-const MODEL_COLORS = ["#7cf2a1", "#8af65d", "#f3df69", "#ff9d51", "#ff6a8a", "#ff7fd0"];
-
-function rotMat(rot) {
-  const [r, p, y] = rot;
-  const cr = Math.cos(r);
-  const sr = Math.sin(r);
-  const cp = Math.cos(p);
-  const sp = Math.sin(p);
-  const cy = Math.cos(y);
-  const sy = Math.sin(y);
-  return [
-    [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
-    [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
-    [-sp, cp * sr, cp * cr],
-  ];
-}
-
-function applyRot(rotation, vector) {
-  return [
-    rotation[0][0] * vector[0] + rotation[0][1] * vector[1] + rotation[0][2] * vector[2],
-    rotation[1][0] * vector[0] + rotation[1][1] * vector[1] + rotation[1][2] * vector[2],
-    rotation[2][0] * vector[0] + rotation[2][1] * vector[1] + rotation[2][2] * vector[2],
-  ];
-}
-
-function project(x, y, z, cam, width, height) {
-  const { az, el, scale } = cam;
-  const cosAz = Math.cos(az);
-  const sinAz = Math.sin(az);
-  const cosEl = Math.cos(el);
-  const sinEl = Math.sin(el);
-  const rx = x * cosAz - y * sinAz;
-  const ry = x * sinAz + y * cosAz;
-  const sx = rx * scale;
-  const sy = (ry * cosEl - z * sinEl) * scale;
-  return [width / 2 + sx, height / 2 + sy];
-}
-
-function drawArena(ctx, cam, width, height, terrain) {
-  ctx.save();
-  if (terrain.kind === "flat") {
-    const size = terrain.field_half_m || 6.0;
-    const corners = [
-      [-size, -size],
-      [size, -size],
-      [size, size],
-      [-size, size],
-    ];
-    const pts = corners.map(([cx, cy]) => project(cx, cy, terrain.floor_height_m || 0.0, cam, width, height));
-    ctx.fillStyle = "#0c1a0f";
-    ctx.strokeStyle = "#1f4b2d";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length; i += 1) ctx.lineTo(pts[i][0], pts[i][1]);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
-    return;
-  }
-
-  for (let stepIndex = terrain.step_count; stepIndex >= 0; stepIndex -= 1) {
-    const radius = terrain.center_half_m + stepIndex * terrain.step_width_m;
-    const z = (terrain.floor_height_m || 0.0) + stepIndex * terrain.step_height_m;
-    const corners = [
-      [-radius, -radius],
-      [radius, -radius],
-      [radius, radius],
-      [-radius, radius],
-    ];
-    const pts = corners.map(([cx, cy]) => project(cx, cy, z, cam, width, height));
-    const color = STEP_COLORS[Math.min(stepIndex, STEP_COLORS.length - 1)];
-
-    ctx.fillStyle = stepIndex === 0 ? "#102017" : `${color}26`;
-    ctx.strokeStyle = stepIndex === 0 ? "#285539" : `${color}88`;
-    ctx.lineWidth = stepIndex === 0 ? 1 : 1.4;
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0], pts[0][1]);
-    for (let i = 1; i < pts.length; i += 1) ctx.lineTo(pts[i][0], pts[i][1]);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
-function drawGoal(ctx, cam, width, height, goal) {
-  if (!goal || goal.length !== 3) return;
-  const [gx, gy, gz] = goal;
-  const [px, py] = project(gx, gy, gz, cam, width, height);
-  ctx.save();
-  ctx.strokeStyle = "#f0c75d";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(px, py, 8, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(px - 12, py);
-  ctx.lineTo(px + 12, py);
-  ctx.moveTo(px, py - 12);
-  ctx.lineTo(px, py + 12);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawModel(ctx, frame, cam, width, height, robot) {
-  if (!frame || !frame.pos || frame.pos.length < 3 || !frame.rot || frame.rot.length < 3) return;
-
-  const bodyHalfLength = robot.body_length_m / 2;
-  const bodyHalfWidth = robot.body_width_m / 2;
-  const legLength = robot.leg_length_m;
-  const bodyCornersBody = [
-    [-bodyHalfLength, -bodyHalfWidth, 0],
-    [bodyHalfLength, -bodyHalfWidth, 0],
-    [bodyHalfLength, bodyHalfWidth, 0],
-    [-bodyHalfLength, bodyHalfWidth, 0],
-  ];
-  const mountsBody = [
-    [bodyHalfLength, bodyHalfWidth, 0],
-    [bodyHalfLength, -bodyHalfWidth, 0],
-    [-bodyHalfLength, bodyHalfWidth, 0],
-    [-bodyHalfLength, -bodyHalfWidth, 0],
-  ];
-
-  const bodyPos = frame.pos.slice(0, 3);
-  const bodyRot = frame.rot.slice(0, 3);
-  const legAngles = frame.leg || [];
-  const level = Math.min(Math.max(Math.round(frame.level?.[0] || 0), 0), MODEL_COLORS.length - 1);
-  const color = MODEL_COLORS[level];
-  const rotation = rotMat(bodyRot);
-
-  const projectedBody = bodyCornersBody.map((corner) => {
-    const world = applyRot(rotation, corner);
-    return project(
-      bodyPos[0] + world[0],
-      bodyPos[1] + world[1],
-      bodyPos[2] + world[2],
-      cam,
-      width,
-      height,
-    );
-  });
-
-  ctx.save();
-  ctx.fillStyle = `${color}22`;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(projectedBody[0][0], projectedBody[0][1]);
-  for (let i = 1; i < projectedBody.length; i += 1) ctx.lineTo(projectedBody[i][0], projectedBody[i][1]);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-
-  ctx.strokeStyle = `${color}bb`;
-  ctx.lineWidth = 1.3;
-  ctx.beginPath();
-  for (let i = 0; i < 4; i += 1) {
-    const mountWorld = applyRot(rotation, mountsBody[i]);
-    const angle = legAngles[i] || 0;
-    const footBody = [legLength * Math.sin(angle), 0, -legLength * Math.cos(angle)];
-    const footWorld = applyRot(rotation, footBody);
-    const mountPoint = project(
-      bodyPos[0] + mountWorld[0],
-      bodyPos[1] + mountWorld[1],
-      bodyPos[2] + mountWorld[2],
-      cam,
-      width,
-      height,
-    );
-    const footPoint = project(
-      bodyPos[0] + mountWorld[0] + footWorld[0],
-      bodyPos[1] + mountWorld[1] + footWorld[1],
-      bodyPos[2] + mountWorld[2] + footWorld[2],
-      cam,
-      width,
-      height,
-    );
-    ctx.moveTo(mountPoint[0], mountPoint[1]);
-    ctx.lineTo(footPoint[0], footPoint[1]);
-  }
-  ctx.stroke();
-  ctx.restore();
-}
+const STEP_COLORS = ["#1f7a5f", "#317f95", "#5969a6", "#a66b43", "#b84f62", "#8654a3"];
+const TRAIL_LIMIT = 180;
+const FRAME_BUFFER_LIMIT = 900;
 
 function basename(value) {
   if (!value) return "uninitialized";
@@ -227,74 +60,301 @@ function basename(value) {
   return parts[parts.length - 1] || value;
 }
 
-export default function App() {
-  const canvasRef = useRef(null);
-  const camRef = useRef(null);
-  const animRef = useRef(null);
-  const [connected, setConnected] = useState(false);
-  const [metadata, setMetadata] = useState(DEFAULT_METADATA);
-  const [frame, setFrame] = useState(null);
-  const [status, setStatus] = useState(null);
+function formatNumber(value, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "0.00";
+  return Number(value).toFixed(digits);
+}
 
-  function getCam(width, height) {
-    if (!camRef.current) {
-      camRef.current = {
-        az: Math.PI / 4,
-        el: Math.PI / 5,
-        scale: Math.min(width, height) / 24,
-        dragging: false,
-        lastX: 0,
-        lastY: 0,
-      };
-    }
-    return camRef.current;
+function terrainHalf(terrain) {
+  return Math.max(terrain?.field_half_m || 6.0, 1.0);
+}
+
+function mapTransform(width, height, terrain) {
+  const half = terrainHalf(terrain);
+  const padding = Math.max(34, Math.min(width, height) * 0.06);
+  const scale = Math.min((width - padding * 2) / (half * 2), (height - padding * 2) / (half * 2));
+  return {
+    cx: width / 2,
+    cy: height / 2,
+    scale,
+    half,
+  };
+}
+
+function worldToScreen(transform, x, y) {
+  return [transform.cx + x * transform.scale, transform.cy - y * transform.scale];
+}
+
+function screenToWorld(transform, x, y) {
+  return [(x - transform.cx) / transform.scale, (transform.cy - y) / transform.scale];
+}
+
+function drawSquare(ctx, transform, half, fill, stroke, width = 1) {
+  const [x0, y0] = worldToScreen(transform, -half, half);
+  const [x1, y1] = worldToScreen(transform, half, -half);
+  ctx.fillStyle = fill;
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = width;
+  ctx.beginPath();
+  ctx.rect(x0, y0, x1 - x0, y1 - y0);
+  ctx.fill();
+  ctx.stroke();
+}
+
+function drawGrid(ctx, transform, terrain) {
+  const half = terrainHalf(terrain);
+  const major = half <= 8 ? 1 : 2;
+  ctx.save();
+  ctx.strokeStyle = "rgba(172, 181, 189, 0.13)";
+  ctx.lineWidth = 1;
+  for (let value = -half; value <= half + 0.001; value += major) {
+    const [x0, y0] = worldToScreen(transform, value, -half);
+    const [x1, y1] = worldToScreen(transform, value, half);
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.stroke();
+
+    const [a0, b0] = worldToScreen(transform, -half, value);
+    const [a1, b1] = worldToScreen(transform, half, value);
+    ctx.beginPath();
+    ctx.moveTo(a0, b0);
+    ctx.lineTo(a1, b1);
+    ctx.stroke();
   }
 
-  useEffect(() => {
+  ctx.strokeStyle = "rgba(238, 242, 245, 0.28)";
+  ctx.beginPath();
+  const [xAxisStartX, xAxisStartY] = worldToScreen(transform, -half, 0);
+  const [xAxisEndX, xAxisEndY] = worldToScreen(transform, half, 0);
+  const [yAxisStartX, yAxisStartY] = worldToScreen(transform, 0, -half);
+  const [yAxisEndX, yAxisEndY] = worldToScreen(transform, 0, half);
+  ctx.moveTo(xAxisStartX, xAxisStartY);
+  ctx.lineTo(xAxisEndX, xAxisEndY);
+  ctx.moveTo(yAxisStartX, yAxisStartY);
+  ctx.lineTo(yAxisEndX, yAxisEndY);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawArena(ctx, transform, terrain) {
+  ctx.save();
+  drawSquare(ctx, transform, transform.half, "#11181d", "rgba(221, 226, 232, 0.32)", 1.5);
+
+  if (terrain?.kind === "stepped_arena") {
+    for (let step = terrain.step_count; step >= 0; step -= 1) {
+      const half = (terrain.center_half_m || 1.5) + step * (terrain.step_width_m || 1.0);
+      const color = STEP_COLORS[Math.min(step, STEP_COLORS.length - 1)];
+      drawSquare(ctx, transform, half, `${color}22`, `${color}aa`, step === 0 ? 1.3 : 1);
+    }
+  }
+
+  drawGrid(ctx, transform, terrain);
+  ctx.restore();
+}
+
+function drawGoal(ctx, transform, goal) {
+  if (!Array.isArray(goal) || goal.length < 2) return;
+  const [px, py] = worldToScreen(transform, goal[0], goal[1]);
+  ctx.save();
+  ctx.strokeStyle = "#f0b84f";
+  ctx.fillStyle = "rgba(240, 184, 79, 0.16)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(px, py, 14, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(px - 20, py);
+  ctx.lineTo(px + 20, py);
+  ctx.moveTo(px, py - 20);
+  ctx.lineTo(px, py + 20);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawTrail(ctx, transform, trail) {
+  if (trail.length < 2) return;
+  ctx.save();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = "rgba(98, 196, 161, 0.58)";
+  ctx.beginPath();
+  trail.forEach((point, index) => {
+    const [x, y] = worldToScreen(transform, point[0], point[1]);
+    if (index === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawBody(ctx, transform, frame, robot) {
+  if (!frame?.pos || frame.pos.length < 2) return;
+  const x = frame.pos[0];
+  const y = frame.pos[1];
+  const yaw = frame.rot?.[2] || 0;
+  const bodyLength = robot?.body_length_m || 0.28;
+  const bodyWidth = robot?.body_width_m || 0.12;
+  const halfLength = bodyLength / 2;
+  const halfWidth = bodyWidth / 2;
+  const corners = [
+    [halfLength, halfWidth],
+    [halfLength, -halfWidth],
+    [-halfLength, -halfWidth],
+    [-halfLength, halfWidth],
+  ].map(([cx, cy]) => {
+    const cos = Math.cos(yaw);
+    const sin = Math.sin(yaw);
+    return [x + cx * cos - cy * sin, y + cx * sin + cy * cos];
+  });
+
+  ctx.save();
+  ctx.fillStyle = "#e8edf1";
+  ctx.strokeStyle = "#14191d";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  corners.forEach(([wx, wy], index) => {
+    const [sx, sy] = worldToScreen(transform, wx, wy);
+    if (index === 0) ctx.moveTo(sx, sy);
+    else ctx.lineTo(sx, sy);
+  });
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  const [noseX, noseY] = worldToScreen(transform, x + halfLength * Math.cos(yaw), y + halfLength * Math.sin(yaw));
+  const [centerX, centerY] = worldToScreen(transform, x, y);
+  ctx.strokeStyle = "#e06a4f";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(centerX, centerY);
+  ctx.lineTo(noseX, noseY);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawLegs(ctx, transform, frame, robot) {
+  const legs = frame?.legs;
+  if (Array.isArray(legs) && legs.length > 0) {
+    ctx.save();
+    ctx.strokeStyle = "rgba(98, 196, 161, 0.9)";
+    ctx.fillStyle = "#62c4a1";
+    ctx.lineWidth = 2;
+    for (const leg of legs) {
+      const mount = leg?.mount;
+      const foot = leg?.foot;
+      if (!Array.isArray(mount) || !Array.isArray(foot)) continue;
+      const [mx, my] = worldToScreen(transform, mount[0], mount[1]);
+      const [fx, fy] = worldToScreen(transform, foot[0], foot[1]);
+      ctx.beginPath();
+      ctx.moveTo(mx, my);
+      ctx.lineTo(fx, fy);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(fx, fy, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+    return;
+  }
+
+  if (!frame?.pos || !Array.isArray(frame.leg)) return;
+  const yaw = frame.rot?.[2] || 0;
+  const bodyLength = robot?.body_length_m || 0.28;
+  const bodyWidth = robot?.body_width_m || 0.12;
+  const legLength = robot?.leg_length_m || 0.16;
+  const mounts = [
+    [bodyLength / 2, bodyWidth / 2],
+    [bodyLength / 2, -bodyWidth / 2],
+    [-bodyLength / 2, bodyWidth / 2],
+    [-bodyLength / 2, -bodyWidth / 2],
+  ];
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(98, 196, 161, 0.8)";
+  ctx.lineWidth = 2;
+  for (let index = 0; index < mounts.length; index += 1) {
+    const [mxBody, myBody] = mounts[index];
+    const angle = frame.leg[index] || 0;
+    const footBody = [mxBody + Math.sin(angle) * legLength, myBody];
+    const cos = Math.cos(yaw);
+    const sin = Math.sin(yaw);
+    const mount = [
+      frame.pos[0] + mxBody * cos - myBody * sin,
+      frame.pos[1] + mxBody * sin + myBody * cos,
+    ];
+    const foot = [
+      frame.pos[0] + footBody[0] * cos - footBody[1] * sin,
+      frame.pos[1] + footBody[0] * sin + footBody[1] * cos,
+    ];
+    const [mx, my] = worldToScreen(transform, mount[0], mount[1]);
+    const [fx, fy] = worldToScreen(transform, foot[0], foot[1]);
+    ctx.beginPath();
+    ctx.moveTo(mx, my);
+    ctx.lineTo(fx, fy);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+export default function App() {
+  const canvasRef = useRef(null);
+  const socketRef = useRef(null);
+  const frameQueueRef = useRef([]);
+  const lastFrameAdvanceRef = useRef(0);
+  const streamRef = useRef(null);
+  const trailRef = useRef([]);
+  const lastTrailFrameRef = useRef(null);
+  const [connected, setConnected] = useState(false);
+  const [metadata, setMetadata] = useState(DEFAULT_METADATA);
+  const [models, setModels] = useState([]);
+  const [selectedModelId, setSelectedModelId] = useState("");
+  const [frame, setFrame] = useState(null);
+  const [status, setStatus] = useState(null);
+  const [goal, setGoal] = useState(null);
+  const [bufferDepth, setBufferDepth] = useState(0);
+
+  function sendMessage(payload) {
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify(payload));
+    }
+  }
+
+  function selectModel(modelId) {
+    setSelectedModelId(modelId);
+    frameQueueRef.current = [];
+    trailRef.current = [];
+    setFrame(null);
+    sendMessage({ type: "select_model", model_id: modelId || null });
+  }
+
+  function placeGoal(worldX, worldY) {
+    const terrain = metadata.terrain || DEFAULT_METADATA.terrain;
+    const half = terrainHalf(terrain);
+    const nextGoal = [
+      clamp(worldX, -half, half),
+      clamp(worldY, -half, half),
+      metadata.goal?.height_m || DEFAULT_METADATA.goal.height_m,
+    ];
+    setGoal(nextGoal);
+    frameQueueRef.current = [];
+    trailRef.current = [];
+    sendMessage({ type: "set_goal", goal: nextGoal });
+  }
+
+  function handleCanvasPointerUp(event) {
     const canvas = canvasRef.current;
-    if (!canvas) return undefined;
-
-    function onMouseDown(event) {
-      const cam = camRef.current;
-      if (!cam) return;
-      cam.dragging = true;
-      cam.lastX = event.clientX;
-      cam.lastY = event.clientY;
-    }
-
-    function onMouseMove(event) {
-      const cam = camRef.current;
-      if (!cam || !cam.dragging) return;
-      cam.az -= (event.clientX - cam.lastX) * 0.005;
-      cam.el = Math.max(0.08, Math.min(Math.PI * 0.48, cam.el + (event.clientY - cam.lastY) * 0.005));
-      cam.lastX = event.clientX;
-      cam.lastY = event.clientY;
-    }
-
-    function onMouseUp() {
-      if (camRef.current) camRef.current.dragging = false;
-    }
-
-    function onWheel(event) {
-      const cam = camRef.current;
-      if (!cam) return;
-      event.preventDefault();
-      cam.scale *= event.deltaY > 0 ? 0.93 : 1.07;
-      cam.scale = Math.max(2, Math.min(900, cam.scale));
-    }
-
-    canvas.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("mouseup", onMouseUp);
-    canvas.addEventListener("wheel", onWheel, { passive: false });
-
-    return () => {
-      canvas.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("mouseup", onMouseUp);
-      canvas.removeEventListener("wheel", onWheel);
-    };
-  }, []);
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const terrain = metadata.terrain || DEFAULT_METADATA.terrain;
+    const transform = mapTransform(rect.width, rect.height, terrain);
+    const [worldX, worldY] = screenToWorld(transform, event.clientX - rect.left, event.clientY - rect.top);
+    placeGoal(worldX, worldY);
+  }
 
   useEffect(() => {
     let socket;
@@ -302,6 +362,7 @@ export default function App() {
 
     function connect() {
       socket = new WebSocket(WS_URL);
+      socketRef.current = socket;
       socket.onopen = () => setConnected(true);
       socket.onclose = () => {
         setConnected(false);
@@ -310,9 +371,37 @@ export default function App() {
       socket.onerror = () => socket.close();
       socket.onmessage = (event) => {
         const message = JSON.parse(event.data);
-        if (message.type === "metadata") setMetadata((current) => ({ ...current, ...message }));
-        if (message.type === "frame") setFrame(message);
-        if (message.type === "generation") setStatus(message);
+        if (message.type === "metadata") {
+          setMetadata((current) => ({ ...current, ...message }));
+        } else if (message.type === "models") {
+          setModels(message.models || []);
+          setSelectedModelId(message.selected_model_id || "");
+        } else if (message.type === "generation") {
+          setStatus(message);
+          if (Array.isArray(message.goal)) setGoal(message.goal);
+          if (message.stream_id && message.stream_id !== streamRef.current) {
+            streamRef.current = message.stream_id;
+            frameQueueRef.current = [];
+            trailRef.current = [];
+            setFrame(null);
+          }
+        } else if (message.type === "goal") {
+          if (Array.isArray(message.goal)) setGoal(message.goal);
+        } else if (message.type === "frame_batch") {
+          if (message.stream_id && message.stream_id !== streamRef.current) {
+            streamRef.current = message.stream_id;
+            frameQueueRef.current = [];
+            trailRef.current = [];
+          }
+          const frames = Array.isArray(message.frames) ? message.frames : [];
+          frameQueueRef.current.push(...frames);
+          if (frameQueueRef.current.length > FRAME_BUFFER_LIMIT) {
+            frameQueueRef.current.splice(0, frameQueueRef.current.length - FRAME_BUFFER_LIMIT);
+          }
+          setBufferDepth(frameQueueRef.current.length);
+        } else if (message.type === "frame") {
+          setFrame(message);
+        }
       };
     }
 
@@ -326,11 +415,34 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
 
+    function tick(timestamp) {
+      if (cancelled) return;
+      const dtMs = Math.max(16, (metadata.training?.brain_dt_s || DEFAULT_METADATA.training.brain_dt_s) * 1000);
+      if (!lastFrameAdvanceRef.current) lastFrameAdvanceRef.current = timestamp;
+      if (frameQueueRef.current.length > 0 && timestamp - lastFrameAdvanceRef.current >= dtMs) {
+        const nextFrame = frameQueueRef.current.shift();
+        lastFrameAdvanceRef.current = timestamp;
+        setFrame(nextFrame);
+        setBufferDepth(frameQueueRef.current.length);
+      }
+      window.requestAnimationFrame(tick);
+    }
+
+    const requestId = window.requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(requestId);
+    };
+  }, [metadata.training?.brain_dt_s]);
+
+  useEffect(() => {
+    let cancelled = false;
+
     function render() {
       if (cancelled) return;
       const canvas = canvasRef.current;
       if (!canvas) {
-        animRef.current = requestAnimationFrame(render);
+        window.requestAnimationFrame(render);
         return;
       }
 
@@ -339,83 +451,107 @@ export default function App() {
       if (canvas.width !== width) canvas.width = width;
       if (canvas.height !== height) canvas.height = height;
       const ctx = canvas.getContext("2d");
-      const cam = getCam(width, height);
       const terrain = metadata.terrain || DEFAULT_METADATA.terrain;
       const robot = metadata.robot || DEFAULT_METADATA.robot;
-      const goal = frame?.goal || status?.goal || metadata?.goal?.fixed_goal_xyz;
+      const transform = mapTransform(width, height, terrain);
+      const activeGoal = goal || frame?.goal || status?.goal || metadata.goal?.fixed_goal_xyz;
 
-      ctx.fillStyle = "#08120d";
+      if (frame?.pos && frame !== lastTrailFrameRef.current) {
+        trailRef.current.push([frame.pos[0], frame.pos[1]]);
+        if (trailRef.current.length > TRAIL_LIMIT) trailRef.current.shift();
+        lastTrailFrameRef.current = frame;
+      }
+
+      ctx.fillStyle = "#0e1114";
       ctx.fillRect(0, 0, width, height);
-
-      drawArena(ctx, cam, width, height, terrain);
-      drawGoal(ctx, cam, width, height, goal);
-      drawModel(ctx, frame, cam, width, height, robot);
+      drawArena(ctx, transform, terrain);
+      drawTrail(ctx, transform, trailRef.current);
+      drawGoal(ctx, transform, activeGoal);
+      drawLegs(ctx, transform, frame, robot);
+      drawBody(ctx, transform, frame, robot);
 
       if (!frame) {
-        ctx.fillStyle = "#587760";
-        ctx.font = "18px 'IBM Plex Mono', monospace";
+        ctx.fillStyle = "#9aa4ad";
+        ctx.font = "16px ui-monospace, SFMono-Regular, Menlo, monospace";
         ctx.textAlign = "center";
-        ctx.fillText(connected ? "Waiting for model frames..." : `Connecting to ${WS_URL}`, width / 2, height / 2);
+        ctx.fillText(connected ? "Waiting for replay frames" : `Connecting to ${WS_URL}`, width / 2, height / 2);
         ctx.textAlign = "left";
       }
 
-      animRef.current = requestAnimationFrame(render);
+      window.requestAnimationFrame(render);
     }
 
-    animRef.current = requestAnimationFrame(render);
+    window.requestAnimationFrame(render);
     return () => {
       cancelled = true;
-      cancelAnimationFrame(animRef.current);
     };
-  }, [connected, frame, metadata, status]);
+  }, [connected, frame, goal, metadata, status]);
 
+  const activeModel = models.find((model) => model.id === selectedModelId);
+  const checkpointLoaded = basename(status?.checkpoint_loaded || activeModel?.checkpoint_path);
+  const simulatorBackend = status?.simulator_backend || metadata.simulator?.backend || "unified";
   const viewerResetSeconds = metadata.training?.viewer_reset_s ?? DEFAULT_METADATA.training.viewer_reset_s;
   const remainingReset = Math.max(0, viewerResetSeconds - (frame?.time_s ?? 0));
-  const checkpointLoaded = basename(status?.checkpoint_loaded);
-  const simulatorBackend = status?.simulator_backend || metadata.simulator?.backend || "jax";
 
   return (
     <div className="app-shell">
-      <canvas ref={canvasRef} className="arena-canvas" />
+      <canvas ref={canvasRef} className="arena-canvas" onPointerUp={handleCanvasPointerUp} />
 
-      <aside className="hud-card hud-card--primary">
-        <div className="hud-kicker">
-          Current Model Replay
-          <span className={`status-pill ${connected ? "status-pill--live" : "status-pill--offline"}`}>
-            {connected ? "connected" : "offline"}
-          </span>
+      <aside className="control-panel">
+        <div className="panel-header">
+          <div>
+            <span className="eyebrow">Quadruped Reward Map</span>
+            <h1>Live Replay</h1>
+          </div>
+          <div className="connection-state">
+            <span className={connected ? "state-dot state-dot--live" : "state-dot"} />
+            {connected ? "live" : "offline"}
+          </div>
         </div>
-        <h1 className="hud-title">Quadruped Viewer</h1>
-        <p className="hud-subtitle">
-          config <strong>{metadata.config_name}</strong> on <strong>{simulatorBackend}</strong>
-        </p>
 
-        <div className="metrics-grid">
+        <label className="field-label" htmlFor="model-select">Model</label>
+        <select
+          id="model-select"
+          className="model-select"
+          value={selectedModelId}
+          onChange={(event) => selectModel(event.target.value)}
+        >
+          {models.length === 0 ? (
+            <option value="">No saved models</option>
+          ) : (
+            models.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.id}
+              </option>
+            ))
+          )}
+        </select>
+
+        <div className="metric-table">
           <div><span>checkpoint</span><strong>{checkpointLoaded}</strong></div>
-          <div><span>reset in</span><strong>{remainingReset.toFixed(1)}s</strong></div>
-          <div><span>generation</span><strong>{status?.generation ?? 0}</strong></div>
-          <div><span>mean reward</span><strong>{status?.mean_reward?.toFixed(2) ?? "0.00"}</strong></div>
-          <div><span>best reward</span><strong>{status?.best_reward?.toFixed(2) ?? "0.00"}</strong></div>
-          <div><span>frame time</span><strong>{frame?.time_s?.toFixed(1) ?? "0.0"}s</strong></div>
+          <div><span>model type</span><strong>{activeModel?.model_type || metadata.model?.active}</strong></div>
+          <div><span>generation</span><strong>{status?.generation ?? activeModel?.generation ?? 0}</strong></div>
+          <div><span>best reward</span><strong>{formatNumber(status?.best_reward ?? activeModel?.best_reward)}</strong></div>
+          <div><span>mean reward</span><strong>{formatNumber(status?.mean_reward ?? activeModel?.mean_reward)}</strong></div>
+          <div><span>buffer</span><strong>{bufferDepth}</strong></div>
+          <div><span>reset</span><strong>{formatNumber(remainingReset, 1)}s</strong></div>
+          <div><span>backend</span><strong>{simulatorBackend}</strong></div>
         </div>
-
-        <p className="hud-note">
-          This viewer replays the current model only. It does not train or mutate weights, and it resets every {viewerResetSeconds.toFixed(0)} seconds.
-        </p>
       </aside>
 
-      <aside className="hud-card hud-card--secondary">
-        <div className="spec-grid">
-          <div><span>terrain</span><strong>{metadata.terrain.kind}</strong></div>
-          <div><span>steps</span><strong>{metadata.terrain.step_count}</strong></div>
-          <div><span>step width</span><strong>{metadata.terrain.step_width_m}m</strong></div>
-          <div><span>step height</span><strong>{metadata.terrain.step_height_m}m</strong></div>
-          <div><span>population</span><strong>{metadata.training.population_size}</strong></div>
-          <div><span>episode</span><strong>{metadata.training.episode_s}s</strong></div>
-          <div><span>backend</span><strong>{simulatorBackend}</strong></div>
-          <div><span>mode</span><strong>{metadata.mode}</strong></div>
+      <aside className="target-panel">
+        <div className="target-row">
+          <span>Reward target</span>
+          <strong>{goal ? `${formatNumber(goal[0], 2)}, ${formatNumber(goal[1], 2)}` : "none"}</strong>
         </div>
-        <p className="hud-note">Drag to orbit. Scroll to zoom. The goal marker and reset timer come from the active replay stream.</p>
+        <div className="target-row">
+          <span>Frame time</span>
+          <strong>{formatNumber(frame?.time_s, 1)}s</strong>
+        </div>
+        <div className="target-row">
+          <span>Config</span>
+          <strong>{metadata.config_name}</strong>
+        </div>
       </aside>
     </div>
   );

@@ -1,5 +1,11 @@
 name: default
 
+model:
+  type: shared_trunk_es
+  architecture: shared_trunk_motor_lanes
+  trainer: openai_es
+  description: Current JAX policy vector with shared trunk and per-motor lanes.
+
 simulator:
   backend: unified
   render: false
