@@ -6,9 +6,9 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 
-from ai.config import canonical_config_json, load_runtime_spec
-from ai.api.live import app as viewer_app
-from ai.runtime import resolve_viewer_checkpoint
+from brains.config import canonical_config_json, load_runtime_spec
+from brains.api.live import app as frontend
+from brains.runtime import resolve_viewer_checkpoint
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -24,10 +24,11 @@ def _write_checkpoint(path: Path, config_path: Path, *, simulator_backend: str |
 
 
 class ServiceImportTests(unittest.TestCase):
-    def test_viewer_app_routes_exist(self) -> None:
-        paths = {route.path for route in viewer_app.routes}
+    def test_frontend_routes_exist(self) -> None:
+        paths = {route.path for route in frontend.routes}
         self.assertIn("/", paths)
         self.assertIn("/healthz", paths)
+        self.assertIn("/models", paths)
         self.assertIn("/ws", paths)
 
     def test_checkpoint_resolution_order(self) -> None:

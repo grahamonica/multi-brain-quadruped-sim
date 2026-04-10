@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from ai.config import DEFAULT_CONFIG_PATH, load_runtime_spec, runtime_spec_from_dict, save_runtime_spec
+from brains.config import DEFAULT_CONFIG_PATH, load_runtime_spec, runtime_spec_from_dict, save_runtime_spec
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

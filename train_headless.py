@@ -8,14 +8,14 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from ai.config import DEFAULT_CONFIG_PATH, RuntimeSpec, load_runtime_spec
-from ai.infra import MetricsSink, configure_logging, create_run_artifacts, write_json
-from ai.quality import QualityGateRunner
-from ai.jax_trainer import ESTrainer, apply_runtime_spec
+from brains.config import DEFAULT_CONFIG_PATH, RuntimeSpec, load_runtime_spec
+from brains.infra import MetricsSink, configure_logging, create_run_artifacts, write_json
+from brains.models import get_model_definition
+from brains.runtime import create_model_run_paths, write_model_manifest
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run headless quadruped training and save checkpoints.")
+    parser = argparse.ArgumentParser(description="Run headless quadruped training and save model weights.")
     parser.add_argument(
         "--config",
         type=Path,
@@ -23,19 +23,31 @@ def _parse_args() -> argparse.Namespace:
         help="YAML or JSON runtime spec. Defaults to configs/default.yaml.",
     )
     parser.add_argument("--run-name", type=str, default=None, help="Optional run name used for log artifact directories.")
+    parser.add_argument(
+        "--model-type",
+        type=str,
+        default=None,
+        help="Override model.type from the runtime spec. The current registered type is shared_trunk_es.",
+    )
+    parser.add_argument(
+        "--log-id",
+        type=str,
+        default=None,
+        help="Stable log ID for this model run. Reusing it resumes that model directory when possible.",
+    )
     parser.add_argument("--generations", type=int, default=100, help="Number of generations to train.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for trainer initialization.")
     parser.add_argument(
         "--out-dir",
         type=Path,
         default=Path("checkpoints"),
-        help="Directory for checkpoint files.",
+        help="Root directory for model run weight files.",
     )
     parser.add_argument(
         "--save-every",
         type=int,
         default=5,
-        help="Retained for CLI compatibility; numbered generation checkpoints are not written.",
+        help="Retained for CLI compatibility; numbered generation model weights are not written.",
     )
     parser.add_argument(
         "--resume",
@@ -76,6 +88,8 @@ def _parse_args() -> argparse.Namespace:
 
 def _apply_cli_overrides(spec: RuntimeSpec, args: argparse.Namespace) -> RuntimeSpec:
     updated = spec
+    if args.model_type is not None:
+        updated = replace(updated, model=replace(updated.model, type=str(args.model_type)))
     if args.episode_seconds is not None:
         updated = replace(updated, episode=replace(updated.episode, episode_s=float(args.episode_seconds)))
     if args.population_size is not None:
@@ -86,19 +100,28 @@ def _apply_cli_overrides(spec: RuntimeSpec, args: argparse.Namespace) -> Runtime
 
 def main() -> int:
     args = _parse_args()
-    spec = _apply_cli_overrides(load_runtime_spec(args.config), args)
-    apply_runtime_spec(spec)
+    from brains.jax_trainer import ESTrainer, apply_runtime_spec
+    from brains.quality import QualityGateRunner
 
-    artifacts = create_run_artifacts(spec, run_name=args.run_name)
+    spec = _apply_cli_overrides(load_runtime_spec(args.config), args)
+    model_definition = get_model_definition(spec.model.type)
+    apply_runtime_spec(spec)
+    model_paths = create_model_run_paths(args.out_dir, spec.model.type, args.log_id)
+
+    artifacts = create_run_artifacts(spec, run_name=args.run_name or model_paths.id)
     logger = configure_logging(spec, artifacts)
     metrics = MetricsSink(artifacts.metrics_path)
     metrics.emit(
         "run_started",
         config_path=str(Path(args.config).resolve()),
         config_name=spec.name,
+        model_type=spec.model.type,
+        model_architecture=model_definition.architecture,
+        model_id=model_paths.id,
+        log_id=model_paths.log_id,
         generations=args.generations,
         seed=args.seed,
-        checkpoint_dir=str(args.out_dir.resolve()),
+        checkpoint_dir=str(model_paths.run_dir.resolve()),
     )
 
     quality_report = None
@@ -119,13 +142,13 @@ def main() -> int:
         return 0
 
     start_time_s = time.perf_counter()
-    trainer = ESTrainer(seed=args.seed, spec=spec)
-    latest_path = args.out_dir / "latest.npz"
+    trainer = ESTrainer(seed=args.seed, spec=spec, model_id=model_paths.id, log_id=model_paths.log_id)
+    latest_path = model_paths.latest_path
 
     if args.resume is not None:
         trainer.load_checkpoint(args.resume)
         logger.info("Resumed from checkpoint", extra={"checkpoint_path": str(args.resume)})
-    elif latest_path.exists():
+    elif args.log_id is not None and latest_path.exists():
         try:
             trainer.load_checkpoint(latest_path)
             logger.info("Auto-resumed from latest checkpoint", extra={"checkpoint_path": str(latest_path)})
@@ -134,8 +157,8 @@ def main() -> int:
                 "Skipped incompatible latest checkpoint",
                 extra={"checkpoint_path": str(latest_path), "reason": str(exc)},
             )
-    elif (args.out_dir / "best.npz").exists():
-        fallback_best = args.out_dir / "best.npz"
+    elif args.log_id is not None and model_paths.best_path.exists():
+        fallback_best = model_paths.best_path
         try:
             trainer.load_checkpoint(fallback_best)
             logger.info("Auto-resumed from best checkpoint", extra={"checkpoint_path": str(fallback_best)})
@@ -144,17 +167,30 @@ def main() -> int:
                 "Skipped incompatible best checkpoint",
                 extra={"checkpoint_path": str(fallback_best), "reason": str(exc)},
             )
+    trainer.model_id = model_paths.id
+    trainer.log_id = model_paths.log_id
 
-    best_path = args.out_dir / "best.npz"
+    best_path = model_paths.best_path
     interrupted = False
 
     def _save_checkpoint(path: Path, label: str) -> Path:
         saved_path = trainer.save_checkpoint(path)
+        write_model_manifest(
+            model_paths,
+            spec,
+            saved_path,
+            generation=trainer.state.generation,
+            best_reward=trainer.state.best_reward,
+            mean_reward=trainer.state.mean_reward,
+            log_run_id=artifacts.run_id,
+            log_run_dir=artifacts.run_dir,
+        )
         logger.info(
             "Checkpoint updated",
             extra={
                 "label": label,
                 "generation": trainer.state.generation,
+                "model_id": model_paths.id,
                 "checkpoint_path": str(saved_path),
             },
         )
@@ -174,7 +210,10 @@ def main() -> int:
             "devices": trainer.device_summary,
             "population_size": spec.training.population_size,
             "episode_seconds": spec.episode.episode_s,
+            "model_type": spec.model.type,
+            "model_id": model_paths.id,
             "run_dir": str(artifacts.run_dir),
+            "checkpoint_dir": str(model_paths.run_dir),
         },
     )
     previous_best = trainer.state.best_reward
@@ -221,6 +260,8 @@ def main() -> int:
             best_single_reward=trainer.state.best_single_reward,
             elapsed_s=elapsed_s,
             goal_xyz=list(trainer.state.goal_xyz),
+            model_id=model_paths.id,
+            checkpoint_path=str(latest_path),
         )
         logger.info(
             "Generation completed",
@@ -242,6 +283,10 @@ def main() -> int:
         "elapsed_s": total_elapsed_s,
         "latest_checkpoint": str(latest_path),
         "best_checkpoint": str(best_path),
+        "model_id": model_paths.id,
+        "model_type": spec.model.type,
+        "log_id": model_paths.log_id,
+        "model_manifest": str(model_paths.manifest_path),
         "quality_report_path": str(artifacts.quality_report_path) if quality_report is not None else None,
     }
     write_json(artifacts.run_dir / "summary.json", summary)

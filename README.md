@@ -1,32 +1,34 @@
-# AI Quadruped v2
+# Multi-Brain Quadruped Sim
 
-Config-driven quadruped training stack. The repo is organized as follows: a domain layer for the robot and environment, packaged runtime code under `ai/`, declarative configs, structured logs, regression tests, and one live viewer stack. The runtime uses JAX for policy math and optimization, and MuJoCo for rollout and playback.
+Config-driven quadruped training stack. The repo is organized as follows: a domain layer for the robot and environment, packaged runtime code under `brains/`, declarative configs, structured run logs, regression tests, and one live viewer stack. The runtime uses JAX for policy math and optimization, and MuJoCo for rollout and playback.
 
 **Repo Layout**
 
 - `quadruped/`: domain models for body, leg, motor, robot, and environment/task representation.
-- `ai/sim/`: runtime rollout code, MuJoCo integration, and internal simulator helpers.
-- `ai/api/`: FastAPI websocket service for the frontend viewer.
-- `ai/config/`: typed YAML/JSON runtime spec loading and validation.
-- `ai/infra/`: structured run logging and artifact helpers.
-- `ai/quality/`: quality gates and fixed-seed regression tooling.
-- `ai/runtime/`: checkpoint and launcher runtime helpers.
-- `ai/`: the single trainer implementation, simulator-facing runtime glue, and compatibility exports.
+- `brains/sim/`: runtime rollout code, MuJoCo integration, and internal simulator helpers.
+- `brains/api/`: FastAPI websocket service for the viewer app.
+- `brains/config/`: typed YAML/JSON runtime spec loading and validation.
+- `brains/infra/`: structured logs and per-run artifact helpers.
+- `brains/runtime/`: checkpoint compatibility helpers, model weight paths, and model manifests.
+- `brains/models/`: registered trainable model definitions. The current registered model is `shared_trunk_es`.
+- `brains/quality/`: quality gates and fixed-seed regression tooling.
+- `brains/jax_trainer.py`: the current trainable brain implementation.
 - `configs/`: declarative runtime specs in YAML.
-- `frontend/`: React + Vite viewer that consumes websocket metadata and single-model replay frames.
+- `frontend/`: React + Vite viewer that consumes websocket metadata, model lists, reward targets, and replay frame batches.
 - `tests/`: config validation, smoke quality checks, and fixed-seed regression tests.
-- `checkpoints/`: saved model artifacts.
+- `checkpoints/`: saved model artifacts. New runs are stored under `checkpoints/<model_type>_<log_id>/`.
 - `logs/`: per-run structured artifacts and metrics. This directory is gitignored.
 - `.github/workflows/quality-gates.yml`: CI job that runs the unittest suite on push and PRs.
 
 **Architecture**
 
-The runtime is split into four layers:
+The runtime is split into five layers:
 
-1. Domain layer: [quadruped/robot.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/quadruped/robot.py), [quadruped/leg.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/quadruped/leg.py), [quadruped/motor.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/quadruped/motor.py), and [quadruped/environment.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/quadruped/environment.py) define the robot and task in a logical, real-world shape.
-2. Config layer: [ai/config/schema.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/ai/config/schema.py) resolves YAML/JSON into a typed runtime spec.
-3. Runtime layer: [ai/sim/mujoco_backend.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/ai/sim/mujoco_backend.py) owns rollout execution, and [ai/sim/mujoco_model_builder.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/ai/sim/mujoco_model_builder.py) is the only place that translates domain objects into MuJoCo MJCF. [ai/sim/jax_backend.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/ai/sim/jax_backend.py) remains only as an internal reference helper for quality checks.
-4. Training and service layer: [ai/jax_trainer.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/ai/jax_trainer.py) contains the single ES trainer implementation. That trainer keeps optimization and policy math in JAX and always drives rollout through MuJoCo. The service layer exposes the viewer and headless workflows on top of that shared trainer.
+1. Domain layer: [quadruped/robot.py](quadruped/robot.py), [quadruped/leg.py](quadruped/leg.py), [quadruped/motor.py](quadruped/motor.py), and [quadruped/environment.py](quadruped/environment.py) define the robot and task in a logical, real-world shape.
+2. Config layer: [brains/config/schema.py](brains/config/schema.py) resolves YAML/JSON into a typed runtime spec.
+3. Model layer: [brains/models/registry.py](brains/models/registry.py) names the trainable policy types that headless jobs and the viewer can address.
+4. Runtime layer: [brains/sim/mujoco_backend.py](brains/sim/mujoco_backend.py) owns rollout execution, and [brains/sim/mujoco_model_builder.py](brains/sim/mujoco_model_builder.py) is the only place that translates domain objects into MuJoCo MJCF. [brains/sim/jax_backend.py](brains/sim/jax_backend.py) remains only as an internal reference helper for quality checks.
+5. Training and service layer: [brains/jax_trainer.py](brains/jax_trainer.py) contains the current ES trainer implementation. That trainer keeps optimization and policy math in JAX and always drives rollout through MuJoCo. The service layer exposes the viewer and headless workflows on top of that shared trainer.
 
 
 **Runtime Backend**
@@ -60,20 +62,21 @@ The rollout path is built from the existing domain objects. The flow is:
 
 1. `config` -> typed `RuntimeSpec`
 2. `RuntimeSpec` -> `QuadrupedRobot` and `SimulationEnvironment`
-3. domain models -> MuJoCo MJCF in [ai/sim/mujoco_model_builder.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/ai/sim/mujoco_model_builder.py)
+3. domain models -> MuJoCo MJCF in [brains/sim/mujoco_model_builder.py](brains/sim/mujoco_model_builder.py)
 4. compiled model -> `MuJoCoBackend`
-5. runtime backend -> trainer, quality gates, APIs, and frontend metadata
+5. runtime backend -> trainer, quality gates, APIs, and viewer app metadata/frame batches
 
-The frontend still consumes the same websocket frame shape, and checkpoints remain config-aware.
+The viewer app consumes backend metadata, available model artifacts, selected reward goals, and replay frame batches. Checkpoints remain config-aware.
 
 **Runtime Spec**
 
-The trainer reads a resolved environment/task spec from YAML or JSON. The main configs live at [configs/default.yaml](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/configs/default.yaml) and [configs/smoke.yaml](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/configs/smoke.yaml).
+The trainer reads a resolved environment/task spec from YAML or JSON. The main configs live at [configs/default.yaml](configs/default.yaml) and [configs/smoke.yaml](configs/smoke.yaml).
 
-The runtime is fed through explicit domain objects in [quadruped/robot.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/quadruped/robot.py), [quadruped/leg.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/quadruped/leg.py), [quadruped/motor.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/quadruped/motor.py), and [quadruped/environment.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/quadruped/environment.py). MuJoCo uses that shared source of truth and compiles it into MJCF instead of duplicating dimensions or terrain constants in rollout code.
+The runtime is fed through explicit domain objects in [quadruped/robot.py](quadruped/robot.py), [quadruped/leg.py](quadruped/leg.py), [quadruped/motor.py](quadruped/motor.py), and [quadruped/environment.py](quadruped/environment.py). MuJoCo uses that shared source of truth and compiles it into MJCF instead of duplicating dimensions or terrain constants in rollout code.
 
 Supported sections:
 
+- `model`: trainable model type, architecture label, and trainer family.
 - `simulator`: runtime mode and MuJoCo solver/control settings.
 - `terrain`: stepped arena or flat terrain, field bounds, step count/width/height, floor height.
 - `goals`: radial random goals or a fixed goal.
@@ -95,7 +98,7 @@ Checkpoint resumes are config-aware. A resume attempt only fails when the resolv
 python3 -m pip install -r requirements.txt
 ```
 
-For the frontend:
+For the viewer app:
 
 ```bash
 cd frontend
@@ -108,15 +111,15 @@ For reproducible environments and CI/CD compatibility:
 
 ```bash
 # Build Docker image with pinned dependencies
-docker build -t ai-quadruped:latest .
+docker build -t multi-brain-quadruped-sim:latest .
 
 # Run tests in Docker (same environment as CI)
-docker run --rm ai-quadruped:latest
+docker run --rm multi-brain-quadruped-sim:latest
 
 # Run headless training in Docker
 docker run --rm \
   -v $(pwd):/workspace \
-  ai-quadruped:latest \
+  multi-brain-quadruped-sim:latest \
   python train_headless.py --config configs/smoke.yaml --generations 10
 ```
 
@@ -125,11 +128,11 @@ For GPU acceleration (requires `nvidia-docker2`):
 ```bash
 docker run --rm --gpus all \
   -v $(pwd):/workspace \
-  ai-quadruped:latest \
+  multi-brain-quadruped-sim:latest \
   python train_headless.py --config configs/default.yaml --generations 100
 ```
 To locally mimic the Github Actions Linux behavior run this (for a mac):
-docker run --rm --platform linux/amd64 ai-quadruped:latest
+docker run --rm --platform linux/amd64 multi-brain-quadruped-sim:latest
 
 **Quick Start**
 
@@ -173,7 +176,7 @@ The smoke config uses the `runtime` profile. That suite covers:
 - the internal JAX reference path and the runtime path show bounded drift on a fixed smoke rollout
 - MuJoCo rollout time stays inside the configured budget
 
-Fixed-seed regression coverage is enforced in the test suite using the smoke config baseline at [tests/fixtures/smoke_regression_baseline.json](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/tests/fixtures/smoke_regression_baseline.json).
+Fixed-seed regression coverage is enforced in the test suite using the smoke config baseline at [tests/fixtures/smoke_regression_baseline.json](tests/fixtures/smoke_regression_baseline.json).
 
 Run the repo tests locally:
 
@@ -192,23 +195,54 @@ python3 main.py --config configs/default.yaml
 This launcher starts the only UI stack in the repo:
 
 - a FastAPI websocket backend, default port `8000`
-- the Vite frontend, default port `5173`
+- the Vite viewer app, default port `5173`
 
 Both ports are configurable:
 
 ```bash
-python3 main.py --config configs/default.yaml --api-port 8001 --frontend-port 5174
+python3 main.py --config configs/default.yaml --api-port 8001 --viewer-port 5174
 ```
 
-It uses the same runtime config pattern as the headless path, so terrain and robot geometry shown in the frontend come from backend metadata instead of duplicated frontend constants. The viewer contract stays simulator-agnostic; the backend adapts itself to the same metadata and single-model frame shape.
+It uses the same runtime config pattern as the headless path, so terrain and robot geometry shown in the viewer app come from backend metadata instead of duplicated viewer app constants. The viewer discovers saved model artifacts under `checkpoints/`, lets the user select one, and runs playback-only simulation for the selected weights.
+
+**Website Deployment**
+
+The frontend is a static Vite build and can be hosted by any static web host:
+
+```bash
+cd frontend
+VITE_WS_URL=wss://api.your-domain.example/ws npm run build
+```
+
+Deploy `frontend/dist/` to the web host. Run the backend as a separate service behind HTTPS/WSS:
+
+```bash
+QUADRUPED_CONFIG=configs/default.yaml \
+QUADRUPED_CHECKPOINT_ROOT=checkpoints \
+QUADRUPED_CORS_ORIGINS=https://your-domain.example \
+uvicorn brains.api.live:app --host 0.0.0.0 --port 8000
+```
+
+For local development, `main.py` still starts both processes and injects the local websocket port automatically.
+
+**Live Viewer Streaming**
+
+The viewer is split into compute and presentation clocks:
+
+- The backend simulates replay steps from the selected checkpoint and sends small `frame_batch` websocket messages.
+- The browser stores those frames in a short queue and renders them on `requestAnimationFrame` at `episode.brain_dt_s`.
+- If MuJoCo computes faster than real time, the UI already has several frames queued and playback stays smooth.
+- If the user picks another model or places a reward target on the map, the viewer app sends `select_model` or `set_goal`; the backend interrupts the current replay and starts a new stream ID.
+
+That is the efficient part: the simulation thread can compute ahead, while the browser consumes frames at a steady visual cadence instead of blocking on one websocket message per paint.
 
 **How Config Flows Through The System**
 
-1. A YAML or JSON file is loaded through [ai/config/schema.py](/Users/monicagraham/Desktop/GitHub/AI-quadruped-v2/ai/config/schema.py).
+1. A YAML or JSON file is loaded through [brains/config/schema.py](brains/config/schema.py).
 2. That config is converted into domain objects in `quadruped/`.
 3. The single ES trainer applies those values to its runtime constants and cached tensors.
 4. The runtime backend is constructed from those same resolved objects and attached under that trainer.
-5. APIs and the frontend viewer receive metadata derived from the same resolved config.
+5. APIs and the viewer app receive metadata derived from the same resolved config.
 6. Checkpoints embed the resolved config so the runtime can reject genuinely incompatible resumes.
 
 **Train Headless**
@@ -221,8 +255,16 @@ Useful variants:
 
 ```bash
 python3 train_headless.py --config configs/smoke.yaml --quality-only
-python3 train_headless.py --config configs/default.yaml --resume checkpoints/latest.npz
+python3 train_headless.py --config configs/default.yaml --model-type shared_trunk_es --log-id 12389748 --generations 100
+python3 train_headless.py --config configs/default.yaml --resume checkpoints/shared_trunk_es_12389748/latest.npz
 python3 train_headless.py --config configs/default.yaml --population-size 64 --episode-seconds 20
+```
+
+On a SLURM/PACE-style cluster:
+
+```bash
+mkdir -p logs checkpoints
+CONFIG=configs/default.yaml MODEL_TYPE=shared_trunk_es LOG_ID=12389748 GENERATIONS=100 SEED=42 sbatch train.sbatch
 ```
 
 By default the headless entrypoint runs the fast quality gates before training starts. Use `--skip-quality-gates` only when you intentionally want to bypass that preflight.
@@ -237,12 +279,19 @@ Each headless run writes a timestamped artifact directory under `logs/` containi
 - `quality_report.json`: preflight validation results
 - `summary.json`: terminal run summary
 
-Training checkpoints continue to be written to `checkpoints/`:
+Training model weights are written to model-specific directories:
 
-- `latest.npz`
-- `best.npz`
+- `checkpoints/<model_type>_<log_id>/latest.npz`
+- `checkpoints/<model_type>_<log_id>/best.npz`
+- `checkpoints/<model_type>_<log_id>/manifest.json`
 
-Old checkpoints with incompatible parameter shapes or genuinely mismatched configs are rejected during load instead of failing later during rollout. Automatic resume skips incompatible artifacts and starts fresh; explicit `--resume` still fails loudly so you do not accidentally resume the wrong run.
+For example:
+
+```text
+checkpoints/shared_trunk_es_12389748/latest.npz
+```
+
+Old model weights with incompatible parameter shapes or genuinely mismatched configs are rejected during load instead of failing later during rollout. Reusing `--log-id` resumes that model directory when compatible; a new log ID starts a fresh experiment. Explicit `--resume` still fails loudly so you do not accidentally resume the wrong run.
 
 **Runtime Notes**
 
@@ -253,10 +302,10 @@ Old checkpoints with incompatible parameter shapes or genuinely mismatched confi
 **Plot Rewards**
 
 ```bash
-python3 plot_rewards.py --checkpoint checkpoints/latest.npz
+python3 plot_rewards.py --checkpoint checkpoints/shared_trunk_es_12389748/latest.npz
 ```
 
 **Notes**
 
-- `train_headless.py --save-every` is retained only for CLI compatibility. Numbered generation checkpoints are not written.
+- `train_headless.py --save-every` is retained only for CLI compatibility. Numbered generation model weights are not written.
 - The launchers prefer the current Python interpreter first. That avoids silently using a stale repo-local venv when it differs from the environment you are actively running.

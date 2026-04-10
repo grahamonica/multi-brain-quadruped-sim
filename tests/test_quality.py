@@ -4,8 +4,8 @@ import json
 import unittest
 from pathlib import Path
 
-from ai.config import load_runtime_spec
-from ai.quality import QualityGateRunner, compare_regression_to_baseline
+from brains.config import load_runtime_spec
+from brains.quality import QualityGateRunner, compare_regression_to_baseline
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

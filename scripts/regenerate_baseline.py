@@ -5,8 +5,8 @@ import json
 import platform
 from pathlib import Path
 
-from ai.config import load_runtime_spec
-from ai.quality import collect_regression_metrics
+from brains.config import load_runtime_spec
+from brains.quality import collect_regression_metrics
 
 
 def regenerate_baseline():

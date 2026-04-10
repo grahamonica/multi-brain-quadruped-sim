@@ -4,10 +4,10 @@ import json
 import unittest
 from pathlib import Path
 
-from ai.config import load_runtime_spec
-from ai.quality import QualityGateRunner
-from ai.sim.mujoco_backend import MuJoCoBackend
-from ai.jax_trainer import ESTrainer
+from brains.config import load_runtime_spec
+from brains.quality import QualityGateRunner
+from brains.sim.mujoco_backend import MuJoCoBackend
+from brains.jax_trainer import ESTrainer
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

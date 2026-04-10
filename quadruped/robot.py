@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ai.config import RuntimeSpec
+from brains.config import RuntimeSpec
 
 from .body import BodySpec
 from .leg import LegSpec

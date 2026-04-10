@@ -3,8 +3,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from ai.config import load_runtime_spec
-from ai.jax_trainer import apply_runtime_spec, current_environment_model, current_robot_model
+from brains.config import load_runtime_spec
+from brains.jax_trainer import apply_runtime_spec, current_environment_model, current_robot_model
 from quadruped import QuadrupedRobot, SimulationEnvironment
 
 

@@ -5,13 +5,23 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
+from brains.runtime import discover_model_artifacts
+
+
+def _default_checkpoint() -> Path:
+    artifacts = discover_model_artifacts("checkpoints")
+    if artifacts:
+        return artifacts[0].checkpoint_path
+    return Path("checkpoints/latest.npz")
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=Path, default=Path("checkpoints/latest.npz"))
+    parser.add_argument("--checkpoint", type=Path, default=None)
     args = parser.parse_args()
+    checkpoint_path = args.checkpoint or _default_checkpoint()
 
-    with np.load(args.checkpoint, allow_pickle=False) as ckpt:
+    with np.load(checkpoint_path, allow_pickle=False) as ckpt:
         history = ckpt["rewards_history"].tolist()
         generation = int(ckpt["generation"])
 

@@ -1,4 +1,4 @@
-"""Start the unified viewer API and frontend together."""
+"""Start the unified viewer API and viewer app together."""
 
 from __future__ import annotations
 
@@ -7,26 +7,35 @@ import atexit
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
+from http.client import HTTPConnection
 from pathlib import Path
 
-from ai.config import DEFAULT_CONFIG_PATH
+from brains.config import DEFAULT_CONFIG_PATH
 
 
 PROJECT = Path(__file__).parent.resolve()
-FRONTEND = PROJECT / "frontend"
+VIEWER_APP = PROJECT / "frontend"
 PID_FILE = PROJECT / ".server_pids"
 VENV_PY = PROJECT / "venv" / "bin" / "python"
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Start the quadruped viewer API and frontend.")
+    parser = argparse.ArgumentParser(description="Start the quadruped viewer API and viewer app.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Runtime config for the API process.")
     parser.add_argument("--seed", type=int, default=42, help="Trainer seed for the API process.")
     parser.add_argument("--api-port", type=int, default=8000, help="Port for the FastAPI websocket service.")
-    parser.add_argument("--frontend-port", type=int, default=5173, help="Port for the Vite frontend.")
+    parser.add_argument(
+        "--viewer-port",
+        "--frontend-port",
+        dest="viewer_port",
+        type=int,
+        default=5173,
+        help="Port for the Vite viewer app.",
+    )
     return parser.parse_args()
 
 
@@ -49,7 +58,7 @@ _PY = _resolve_python()
 
 def _ensure_runtime_files() -> None:
     missing: list[str] = []
-    for relative_path in ("ai/api/live.py", "frontend/package.json", "frontend/index.html"):
+    for relative_path in ("brains/api/live.py", "frontend/package.json", "frontend/index.html"):
         if not (PROJECT / relative_path).exists():
             missing.append(relative_path)
     if missing:
@@ -94,35 +103,95 @@ def _start_server(api_port: int, config: Path, seed: int) -> subprocess.Popen:
     env["QUADRUPED_CONFIG"] = str(config.resolve())
     env["QUADRUPED_SEED"] = str(seed)
     return subprocess.Popen(
-        [_PY, "-m", "uvicorn", "ai.api.live:app", "--host", "0.0.0.0", "--port", str(api_port), "--log-level", "warning"],
+        [_PY, "-m", "uvicorn", "brains.api.live:app", "--host", "0.0.0.0", "--port", str(api_port), "--log-level", "warning"],
         cwd=PROJECT,
         env=env,
     )
 
 
-def _start_frontend(frontend_port: int, api_port: int) -> subprocess.Popen:
+def _start_frontend(viewer_port: int, api_port: int) -> subprocess.Popen:
     env = os.environ.copy()
     env["VITE_API_PORT"] = str(api_port)
     return subprocess.Popen(
-        ["npm", "run", "dev", "--", "--port", str(frontend_port)],
-        cwd=FRONTEND,
+        ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", str(viewer_port)],
+        cwd=VIEWER_APP,
         env=env,
     )
+
+
+def _wait_for_port(host: str, port: int, timeout_s: float) -> bool:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.8):
+                return True
+        except OSError:
+            time.sleep(0.25)
+    return False
+
+
+def _wait_for_http_ok(host: str, port: int, path: str, timeout_s: float) -> bool:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        connection = None
+        try:
+            connection = HTTPConnection(host, port, timeout=1.5)
+            connection.request("GET", path)
+            response = connection.getresponse()
+            response.read()
+            if 200 <= int(response.status) < 500:
+                return True
+        except OSError:
+            pass
+        finally:
+            if connection is not None:
+                try:
+                    connection.close()
+                except Exception:
+                    pass
+        time.sleep(0.35)
+    return False
+
+
+def _wait_until_ready(
+    server: subprocess.Popen,
+    frontend: subprocess.Popen,
+    api_port: int,
+    viewer_port: int,
+) -> None:
+    print("Waiting for viewer API health endpoint...", flush=True)
+    if not _wait_for_http_ok("127.0.0.1", api_port, "/healthz", timeout_s=45.0):
+        raise RuntimeError(
+            f"Viewer API did not become ready on http://127.0.0.1:{api_port}/healthz "
+            f"(server return code: {server.poll()})."
+        )
+
+    print("Waiting for viewer app dev server...", flush=True)
+    if not _wait_for_port("127.0.0.1", viewer_port, timeout_s=75.0):
+        raise RuntimeError(
+            f"Viewer app did not open port {viewer_port} "
+            f"(viewer app return code: {frontend.poll()})."
+        )
+    if not _wait_for_http_ok("127.0.0.1", viewer_port, "/", timeout_s=20.0):
+        raise RuntimeError(
+            f"Viewer app port {viewer_port} opened but HTTP root did not respond "
+            f"(viewer app return code: {frontend.poll()})."
+        )
 
 
 def main() -> None:
     args = _parse_args()
     _ensure_runtime_files()
 
-    print("Clearing previous run…")
+    print("Clearing previous run…", flush=True)
     _kill_from_pid_file()
     _kill_port(args.api_port)
-    _kill_port(args.frontend_port)
+    _kill_port(args.viewer_port)
 
     processes: list[subprocess.Popen] = []
 
     def _shutdown(_sig=None, _frame=None, *, exit_process: bool = True) -> None:
-        print("\nShutting down…")
+        print("\nShutting down…", flush=True)
         for process in processes:
             try:
                 process.terminate()
@@ -147,20 +216,27 @@ def main() -> None:
     processes.append(server)
     time.sleep(1)
 
-    frontend = _start_frontend(args.frontend_port, args.api_port)
+    frontend = _start_frontend(args.viewer_port, args.api_port)
     processes.append(frontend)
+    try:
+        _wait_until_ready(server, frontend, args.api_port, args.viewer_port)
+    except Exception as exc:
+        print(f"Startup failed: {exc}", flush=True)
+        _shutdown()
+        return
+
     _save_pids(server.pid, frontend.pid)
 
-    print(f"Python          : {_PY}")
-    print(f"Config          : {args.config.resolve()}")
-    print(f"Viewer API      : http://localhost:{args.api_port}")
-    print(f"Frontend        : http://localhost:{args.frontend_port}")
-    print("Press Ctrl-C to stop.\n")
+    print(f"Python          : {_PY}", flush=True)
+    print(f"Config          : {args.config.resolve()}", flush=True)
+    print(f"Viewer API      : http://localhost:{args.api_port}", flush=True)
+    print(f"Viewer app      : http://localhost:{args.viewer_port}", flush=True)
+    print("Press Ctrl-C to stop.\n", flush=True)
 
     while True:
         for process in processes:
             if process.poll() is not None:
-                print(f"Process {process.args[0]} exited with code {process.returncode}")
+                print(f"Process {process.args[0]} exited with code {process.returncode}", flush=True)
                 _shutdown()
         time.sleep(1)
 
