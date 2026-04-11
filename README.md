@@ -269,6 +269,23 @@ CONFIG=configs/default.yaml MODEL_TYPE=shared_trunk_es LOG_ID=12389748 GENERATIO
 
 By default the headless entrypoint runs the fast quality gates before training starts. Use `--skip-quality-gates` only when you intentionally want to bypass that preflight.
 
+**Model Playground Notebook**
+
+[notebooks/model_playground.ipynb](notebooks/model_playground.ipynb) is a Google Drive-backed Jupyter workflow for creating model variants that use the current `shared_trunk_es` trainer shape. It mounts Drive, imports `brains` from the Drive repo copy, persists a model definition to `configs/model_registry.json`, initializes or briefly trains the variant, then saves weights into:
+
+```text
+checkpoints/<model_type>_<log_id>/latest.npz
+```
+
+Those saved artifacts are discoverable by the viewer and by `train_headless.py --resume`.
+
+**Scripted Harnesses**
+
+The harnesses under `brains/harnesses/` are intentionally separate from trainable models for now:
+
+- `DirectionHarness`: maps plain directions to available scripted options like `trot`, `turn_left`, `turn_right`, `back_up`, `stand`, and `stop`.
+- `HeadCameraHarness`: builds on the direction harness and injects a front torso camera named `head_camera` for future VLA observation experiments.
+
 **Run Artifacts**
 
 Each headless run writes a timestamped artifact directory under `logs/` containing:

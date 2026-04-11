@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 
 from brains.config import canonical_config_json, load_runtime_spec
+from brains.models import ModelDefinition, load_model_definitions, refresh_model_definitions, register_model_definition
 from brains.runtime import create_model_run_paths, discover_model_artifacts, write_model_manifest
 
 
@@ -50,6 +51,28 @@ class ModelStoreTests(unittest.TestCase):
         self.assertEqual(artifacts[0].id, "shared_trunk_es_abc123")
         self.assertEqual(artifacts[0].generation, 7)
         self.assertAlmostEqual(artifacts[0].best_reward or 0.0, 12.5)
+
+    def test_model_definition_can_be_persisted_for_notebook_models(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            registry_path = Path(tmp_dir) / "model_registry.json"
+            definition = ModelDefinition(
+                type="notebook_shared_trunk",
+                architecture="shared_trunk_motor_lanes",
+                trainer="openai_es",
+                input_size=48,
+                output_size=4,
+                parameter_count=48516,
+                description="Notebook-created variant of the current shared trunk trainer.",
+            )
+
+            try:
+                register_model_definition(definition, persist=True, registry_path=registry_path)
+                definitions = load_model_definitions(registry_path)
+            finally:
+                refresh_model_definitions()
+
+        self.assertIn("shared_trunk_es", definitions)
+        self.assertEqual(definitions["notebook_shared_trunk"].parameter_count, 48516)
 
 
 if __name__ == "__main__":
