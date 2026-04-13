@@ -18,15 +18,15 @@ class RuntimeBackendTests(unittest.TestCase):
     def test_smoke_runtime_backend_builds(self) -> None:
         spec = load_runtime_spec(SMOKE_CONFIG)
         backend = MuJoCoBackend(spec)
-        self.assertEqual(spec.simulator.backend, "unified")
+        self.assertEqual(spec.simulator.backend, "mujoco")
         self.assertEqual(backend.capabilities.name, "mujoco")
         self.assertEqual(backend.model.nu, 4)
         self.assertEqual(backend.control_substeps, 20)
 
-    def test_single_trainer_uses_unified_runtime_backend(self) -> None:
+    def test_single_trainer_uses_mujoco_runtime_backend(self) -> None:
         spec = load_runtime_spec(SMOKE_CONFIG)
         trainer = ESTrainer(seed=7, spec=spec)
-        self.assertEqual(trainer.backend, "unified")
+        self.assertEqual(trainer.backend, "mujoco")
 
     def test_smoke_runtime_quality_gates_pass(self) -> None:
         report = QualityGateRunner(load_runtime_spec(SMOKE_CONFIG)).run()

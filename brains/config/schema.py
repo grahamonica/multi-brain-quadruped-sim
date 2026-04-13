@@ -373,20 +373,20 @@ class MujocoSpec:
 
 @dataclass(frozen=True)
 class SimulatorSpec:
-    backend: str = "unified"
+    backend: str = "mujoco"
     render: bool = False
     deterministic_mode: bool = True
     mujoco: MujocoSpec = field(default_factory=MujocoSpec)
 
     def validate(self) -> None:
-        if self.backend != "unified":
-            raise ValueError("simulator.backend must be 'unified'. Legacy 'jax'/'mujoco' values are normalized on load.")
+        if self.backend != "mujoco":
+            raise ValueError("simulator.backend must be 'mujoco'. Legacy backend values are normalized on load.")
         self.mujoco.validate()
 
 
 @dataclass(frozen=True)
 class QualityGateSpec:
-    profile: str = "reference"
+    profile: str = "runtime"
     enabled: bool = True
     run_on_startup: bool = True
     collision_sanity_steps: int = 12
@@ -402,8 +402,8 @@ class QualityGateSpec:
     determinism_tolerance: float = 1e-6
 
     def validate(self) -> None:
-        if self.profile not in {"reference", "runtime"}:
-            raise ValueError("quality_gates.profile must be 'reference' or 'runtime'.")
+        if self.profile != "runtime":
+            raise ValueError("quality_gates.profile must be 'runtime'.")
         non_negative_ints = {
             "collision_sanity_steps": self.collision_sanity_steps,
             "unstable_state_steps": self.unstable_state_steps,
@@ -489,9 +489,12 @@ DEFAULT_SPEC = RuntimeSpec()
 
 def runtime_spec_from_dict(raw_data: Mapping[str, Any] | None) -> RuntimeSpec:
     data = _merge_section(DEFAULT_SPEC.to_dict(), dict(raw_data or {}))
-    simulator_backend = str(data["simulator"].get("backend", "unified"))
-    if simulator_backend in {"jax", "mujoco"}:
-        simulator_backend = "unified"
+    simulator_backend = str(data["simulator"].get("backend", "mujoco"))
+    if simulator_backend in {"jax", "unified"}:
+        simulator_backend = "mujoco"
+    quality_profile = str(data["quality_gates"].get("profile", "runtime"))
+    if quality_profile == "reference":
+        quality_profile = "runtime"
     goals_fixed = data["goals"].get("fixed_goal_xyz")
     fixed_goal = None if goals_fixed is None else tuple(float(value) for value in goals_fixed)
 
@@ -543,7 +546,7 @@ def runtime_spec_from_dict(raw_data: Mapping[str, Any] | None) -> RuntimeSpec:
         reward=RewardSpec(**data["reward"]),
         training=TrainingSpec(**data["training"]),
         quality_gates=QualityGateSpec(
-            profile=str(data["quality_gates"].get("profile", "reference")),
+            profile=quality_profile,
             enabled=bool(data["quality_gates"]["enabled"]),
             run_on_startup=bool(data["quality_gates"]["run_on_startup"]),
             collision_sanity_steps=int(data["quality_gates"]["collision_sanity_steps"]),

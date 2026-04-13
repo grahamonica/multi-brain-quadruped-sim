@@ -4,38 +4,34 @@ import unittest
 from pathlib import Path
 
 from brains.config import load_runtime_spec
-from brains.jax_trainer import apply_runtime_spec, current_environment_model, current_robot_model
-from quadruped import QuadrupedRobot, SimulationEnvironment
+import brains.jax_trainer as trainer_module
+from brains.sim.mujoco_layout import LEG_NAMES, leg_body_fractions, mount_points_body, total_robot_mass_kg
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class DomainModelTests(unittest.TestCase):
-    def test_robot_model_is_built_from_runtime_spec(self) -> None:
+    def test_mujoco_layout_is_built_from_runtime_spec(self) -> None:
         spec = load_runtime_spec(PROJECT_ROOT / "configs" / "default.yaml")
-        robot = QuadrupedRobot.from_runtime_spec(spec)
-        self.assertEqual(robot.leg_names, ("front_left", "front_right", "rear_left", "rear_right"))
-        self.assertEqual(robot.mount_points_body[0], (0.14, 0.06, 0.0))
-        self.assertEqual(robot.legs[0].body_sample_fractions, (0.25, 0.5, 0.75))
-        self.assertAlmostEqual(robot.total_mass_kg, 4.8)
+        self.assertEqual(LEG_NAMES, ("front_left", "front_right", "rear_left", "rear_right"))
+        self.assertEqual(mount_points_body(spec)[0], (0.14, 0.06, 0.0))
+        self.assertEqual(leg_body_fractions(spec), (0.25, 0.5, 0.75))
+        self.assertAlmostEqual(total_robot_mass_kg(spec), 4.8)
 
-    def test_environment_model_is_built_from_runtime_spec(self) -> None:
+    def test_runtime_spec_contains_environment_fields(self) -> None:
         spec = load_runtime_spec(PROJECT_ROOT / "configs" / "smoke.yaml")
-        environment = SimulationEnvironment.from_runtime_spec(spec)
-        self.assertEqual(environment.config_name, "smoke")
-        self.assertEqual(environment.terrain.step_count, 2)
-        self.assertEqual(environment.task.spawn_strategy, "uniform_box")
-        self.assertEqual(environment.training.population_size, 8)
+        self.assertEqual(spec.name, "smoke")
+        self.assertEqual(spec.terrain.step_count, 2)
+        self.assertEqual(spec.spawn_policy.strategy, "uniform_box")
+        self.assertEqual(spec.training.population_size, 8)
 
-    def test_jax_runtime_uses_domain_models(self) -> None:
+    def test_jax_runtime_uses_runtime_spec_values(self) -> None:
         spec = load_runtime_spec(PROJECT_ROOT / "configs" / "smoke.yaml")
-        apply_runtime_spec(spec)
-        robot = current_robot_model()
-        environment = current_environment_model()
-        self.assertEqual(robot.motor.max_velocity_rad_s, spec.robot.max_motor_rad_s)
-        self.assertEqual(environment.task.goal_height_m, spec.goals.height_m)
-        self.assertEqual(environment.episode.episode_s, spec.episode.episode_s)
+        trainer_module.apply_runtime_spec(spec)
+        self.assertEqual(trainer_module.MAX_MOTOR_RAD_S, spec.robot.max_motor_rad_s)
+        self.assertEqual(trainer_module.GOAL_HEIGHT_M, spec.goals.height_m)
+        self.assertEqual(trainer_module.EPISODE_S, spec.episode.episode_s)
 
 
 if __name__ == "__main__":

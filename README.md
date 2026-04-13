@@ -1,11 +1,10 @@
 # Multi-Brain Quadruped Sim
 
-Config-driven quadruped training stack. The repo is organized as follows: a domain layer for the robot and environment, packaged runtime code under `brains/`, declarative configs, structured run logs, regression tests, and one live viewer stack. The runtime uses JAX for policy math and optimization, and MuJoCo for rollout and playback.
+Config-driven quadruped training stack. The repo is organized around runtime code under `brains/`, declarative configs, structured run logs, regression tests, and one live viewer stack. The runtime uses JAX for policy math and optimization, and MuJoCo for rollout and playback.
 
 **Repo Layout**
 
-- `quadruped/`: domain models for body, leg, motor, robot, and environment/task representation.
-- `brains/sim/`: runtime rollout code, MuJoCo integration, and internal simulator helpers.
+- `brains/sim/`: runtime rollout code, MuJoCo integration, and simulator geometry/layout helpers.
 - `brains/api/`: FastAPI websocket service for the viewer app.
 - `brains/config/`: typed YAML/JSON runtime spec loading and validation.
 - `brains/infra/`: structured logs and per-run artifact helpers.
@@ -22,13 +21,12 @@ Config-driven quadruped training stack. The repo is organized as follows: a doma
 
 **Architecture**
 
-The runtime is split into five layers:
+The runtime is split into four layers:
 
-1. Domain layer: [quadruped/robot.py](quadruped/robot.py), [quadruped/leg.py](quadruped/leg.py), [quadruped/motor.py](quadruped/motor.py), and [quadruped/environment.py](quadruped/environment.py) define the robot and task in a logical, real-world shape.
-2. Config layer: [brains/config/schema.py](brains/config/schema.py) resolves YAML/JSON into a typed runtime spec.
-3. Model layer: [brains/models/registry.py](brains/models/registry.py) names the trainable policy types that headless jobs and the viewer can address.
-4. Runtime layer: [brains/sim/mujoco_backend.py](brains/sim/mujoco_backend.py) owns rollout execution, and [brains/sim/mujoco_model_builder.py](brains/sim/mujoco_model_builder.py) is the only place that translates domain objects into MuJoCo MJCF. [brains/sim/jax_backend.py](brains/sim/jax_backend.py) remains only as an internal reference helper for quality checks.
-5. Training and service layer: [brains/jax_trainer.py](brains/jax_trainer.py) contains the current ES trainer implementation. That trainer keeps optimization and policy math in JAX and always drives rollout through MuJoCo. The service layer exposes the viewer and headless workflows on top of that shared trainer.
+1. Config layer: [brains/config/schema.py](brains/config/schema.py) resolves YAML/JSON into a typed runtime spec.
+2. Model layer: [brains/models/registry.py](brains/models/registry.py) names the trainable policy types that headless jobs and the viewer can address.
+3. Runtime layer: [brains/sim/mujoco_backend.py](brains/sim/mujoco_backend.py) owns rollout execution, and [brains/sim/mujoco_model_builder.py](brains/sim/mujoco_model_builder.py) compiles runtime config directly into MuJoCo MJCF.
+4. Training and service layer: [brains/jax_trainer.py](brains/jax_trainer.py) contains the current ES trainer implementation. That trainer keeps optimization and policy math in JAX and always drives rollout through MuJoCo. The service layer exposes the viewer and headless workflows on top of that shared trainer.
 
 
 **Runtime Backend**
@@ -37,7 +35,7 @@ The runtime uses the following backend configuration:
 
 ```yaml
 simulator:
-  backend: unified
+  backend: mujoco
   render: false
   deterministic_mode: true
   mujoco:
@@ -53,16 +51,16 @@ simulator:
     joint_range_rad: [-1.1, 1.1]
 ```
 
-`backend: unified` means:
+`backend: mujoco` means:
 
 - JAX owns the policy parameter vector, ES update step, and other compute-heavy math.
 - MuJoCo owns environment rollout, playback, and contact dynamics.
 
-The rollout path is built from the existing domain objects. The flow is:
+The rollout path is built directly from runtime config. The flow is:
 
 1. `config` -> typed `RuntimeSpec`
-2. `RuntimeSpec` -> `QuadrupedRobot` and `SimulationEnvironment`
-3. domain models -> MuJoCo MJCF in [brains/sim/mujoco_model_builder.py](brains/sim/mujoco_model_builder.py)
+2. `RuntimeSpec` -> MuJoCo layout helpers in [brains/sim/mujoco_layout.py](brains/sim/mujoco_layout.py)
+3. layout + config -> MuJoCo MJCF in [brains/sim/mujoco_model_builder.py](brains/sim/mujoco_model_builder.py)
 4. compiled model -> `MuJoCoBackend`
 5. runtime backend -> trainer, quality gates, APIs, and viewer app metadata/frame batches
 
@@ -72,7 +70,7 @@ The viewer app consumes backend metadata, available model artifacts, selected re
 
 The trainer reads a resolved environment/task spec from YAML or JSON. The main configs live at [configs/default.yaml](configs/default.yaml) and [configs/smoke.yaml](configs/smoke.yaml).
 
-The runtime is fed through explicit domain objects in [quadruped/robot.py](quadruped/robot.py), [quadruped/leg.py](quadruped/leg.py), [quadruped/motor.py](quadruped/motor.py), and [quadruped/environment.py](quadruped/environment.py). MuJoCo uses that shared source of truth and compiles it into MJCF instead of duplicating dimensions or terrain constants in rollout code.
+The runtime spec is the source of truth. MuJoCo compiles directly from that spec into MJCF so dimensions, terrain, and control limits stay in one place.
 
 Supported sections:
 
@@ -158,12 +156,7 @@ Fast runtime validation against a config:
 python3 run_quality_gates.py --config configs/smoke.yaml
 ```
 
-The built-in quality suite supports two profiles:
-
-- `runtime`: validates the actual unified MuJoCo-backed runtime.
-- `reference`: runs faster internal reference checks against the legacy JAX simulator helpers.
-
-The smoke config uses the `runtime` profile. That suite covers:
+The built-in quality suite validates the MuJoCo runtime profile. The smoke config uses this profile. It covers:
 
 - invalid spawn detection
 - collision sanity checks
@@ -173,7 +166,6 @@ The smoke config uses the `runtime` profile. That suite covers:
 - reset pose is contact-safe
 - zero-action rollout stays numerically stable
 - identical seed reproduces the same rollout
-- the internal JAX reference path and the runtime path show bounded drift on a fixed smoke rollout
 - MuJoCo rollout time stays inside the configured budget
 
 Fixed-seed regression coverage is enforced in the test suite using the smoke config baseline at [tests/fixtures/smoke_regression_baseline.json](tests/fixtures/smoke_regression_baseline.json).
@@ -239,11 +231,10 @@ That is the efficient part: the simulation thread can compute ahead, while the b
 **How Config Flows Through The System**
 
 1. A YAML or JSON file is loaded through [brains/config/schema.py](brains/config/schema.py).
-2. That config is converted into domain objects in `quadruped/`.
-3. The single ES trainer applies those values to its runtime constants and cached tensors.
-4. The runtime backend is constructed from those same resolved objects and attached under that trainer.
-5. APIs and the viewer app receive metadata derived from the same resolved config.
-6. Checkpoints embed the resolved config so the runtime can reject genuinely incompatible resumes.
+2. The single ES trainer applies those values to its runtime constants and cached tensors.
+3. The runtime backend is constructed from those resolved values and attached under that trainer.
+4. APIs and the viewer app receive metadata derived from the same resolved config.
+5. Checkpoints embed the resolved config so the runtime can reject genuinely incompatible resumes.
 
 **Train Headless**
 
@@ -313,7 +304,7 @@ Old model weights with incompatible parameter shapes or genuinely mismatched con
 **Runtime Notes**
 
 - The runtime backend always uses MuJoCo for rollout.
-- JAX is still used internally for policy math, optimizer updates, and reference/regression tooling.
+- JAX is still used internally for policy math and optimizer updates.
 - The smoke config intentionally uses `terrain.kind: flat` to keep the runtime quality gates narrow and stable.
 
 **Plot Rewards**

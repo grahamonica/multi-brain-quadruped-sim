@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import "./App.css";
 
 const API_PORT = import.meta.env.VITE_API_PORT || "8000";
@@ -11,7 +13,7 @@ const DEFAULT_METADATA = {
   config_name: "default",
   terrain: {
     kind: "stepped_arena",
-    field_half_m: 6.0,
+    field_half_m: 15.0,
     center_half_m: 2.5,
     step_count: 5,
     step_width_m: 2.0,
@@ -21,10 +23,10 @@ const DEFAULT_METADATA = {
   robot: {
     body_length_m: 0.28,
     body_width_m: 0.12,
-    body_height_m: 0.08,
+    body_height_m: 0.02,
     leg_length_m: 0.16,
-    leg_radius_m: 0.02,
-    foot_radius_m: 0.03,
+    leg_radius_m: 0.01,
+    foot_radius_m: 0.01,
   },
   model: {
     active: "shared_trunk_es",
@@ -34,7 +36,7 @@ const DEFAULT_METADATA = {
   },
   goal: {
     strategy: "radial_random",
-    radius_m: 3.0,
+    radius_m: 10.0,
     height_m: 0.16,
     fixed_goal_xyz: null,
   },
@@ -46,13 +48,14 @@ const DEFAULT_METADATA = {
     brain_dt_s: 0.05,
   },
   simulator: {
-    backend: "unified",
+    backend: "mujoco",
   },
 };
 
-const STEP_COLORS = ["#1f7a5f", "#317f95", "#5969a6", "#a66b43", "#b84f62", "#8654a3"];
-const TRAIL_LIMIT = 180;
+const STEP_COLORS = [0x225c48, 0x2f6c56, 0x3b7d64, 0x4a8d73, 0x5ea786, 0x70bf98];
+const TRAIL_LIMIT = 220;
 const FRAME_BUFFER_LIMIT = 900;
+const CLICK_MOVE_TOLERANCE_PX = 6;
 
 function basename(value) {
   if (!value) return "uninitialized";
@@ -65,250 +68,255 @@ function formatNumber(value, digits = 2) {
   return Number(value).toFixed(digits);
 }
 
-function terrainHalf(terrain) {
-  return Math.max(terrain?.field_half_m || 6.0, 1.0);
-}
-
-function mapTransform(width, height, terrain) {
-  const half = terrainHalf(terrain);
-  const padding = Math.max(34, Math.min(width, height) * 0.06);
-  const scale = Math.min((width - padding * 2) / (half * 2), (height - padding * 2) / (half * 2));
-  return {
-    cx: width / 2,
-    cy: height / 2,
-    scale,
-    half,
-  };
-}
-
-function worldToScreen(transform, x, y) {
-  return [transform.cx + x * transform.scale, transform.cy - y * transform.scale];
-}
-
-function screenToWorld(transform, x, y) {
-  return [(x - transform.cx) / transform.scale, (transform.cy - y) / transform.scale];
-}
-
-function drawSquare(ctx, transform, half, fill, stroke, width = 1) {
-  const [x0, y0] = worldToScreen(transform, -half, half);
-  const [x1, y1] = worldToScreen(transform, half, -half);
-  ctx.fillStyle = fill;
-  ctx.strokeStyle = stroke;
-  ctx.lineWidth = width;
-  ctx.beginPath();
-  ctx.rect(x0, y0, x1 - x0, y1 - y0);
-  ctx.fill();
-  ctx.stroke();
-}
-
-function drawGrid(ctx, transform, terrain) {
-  const half = terrainHalf(terrain);
-  const major = half <= 8 ? 1 : 2;
-  ctx.save();
-  ctx.strokeStyle = "rgba(172, 181, 189, 0.13)";
-  ctx.lineWidth = 1;
-  for (let value = -half; value <= half + 0.001; value += major) {
-    const [x0, y0] = worldToScreen(transform, value, -half);
-    const [x1, y1] = worldToScreen(transform, value, half);
-    ctx.beginPath();
-    ctx.moveTo(x0, y0);
-    ctx.lineTo(x1, y1);
-    ctx.stroke();
-
-    const [a0, b0] = worldToScreen(transform, -half, value);
-    const [a1, b1] = worldToScreen(transform, half, value);
-    ctx.beginPath();
-    ctx.moveTo(a0, b0);
-    ctx.lineTo(a1, b1);
-    ctx.stroke();
-  }
-
-  ctx.strokeStyle = "rgba(238, 242, 245, 0.28)";
-  ctx.beginPath();
-  const [xAxisStartX, xAxisStartY] = worldToScreen(transform, -half, 0);
-  const [xAxisEndX, xAxisEndY] = worldToScreen(transform, half, 0);
-  const [yAxisStartX, yAxisStartY] = worldToScreen(transform, 0, -half);
-  const [yAxisEndX, yAxisEndY] = worldToScreen(transform, 0, half);
-  ctx.moveTo(xAxisStartX, xAxisStartY);
-  ctx.lineTo(xAxisEndX, xAxisEndY);
-  ctx.moveTo(yAxisStartX, yAxisStartY);
-  ctx.lineTo(yAxisEndX, yAxisEndY);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawArena(ctx, transform, terrain) {
-  ctx.save();
-  drawSquare(ctx, transform, transform.half, "#11181d", "rgba(221, 226, 232, 0.32)", 1.5);
-
-  if (terrain?.kind === "stepped_arena") {
-    for (let step = terrain.step_count; step >= 0; step -= 1) {
-      const half = (terrain.center_half_m || 1.5) + step * (terrain.step_width_m || 1.0);
-      const color = STEP_COLORS[Math.min(step, STEP_COLORS.length - 1)];
-      drawSquare(ctx, transform, half, `${color}22`, `${color}aa`, step === 0 ? 1.3 : 1);
-    }
-  }
-
-  drawGrid(ctx, transform, terrain);
-  ctx.restore();
-}
-
-function drawGoal(ctx, transform, goal) {
-  if (!Array.isArray(goal) || goal.length < 2) return;
-  const [px, py] = worldToScreen(transform, goal[0], goal[1]);
-  ctx.save();
-  ctx.strokeStyle = "#f0b84f";
-  ctx.fillStyle = "rgba(240, 184, 79, 0.16)";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(px, py, 14, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(px - 20, py);
-  ctx.lineTo(px + 20, py);
-  ctx.moveTo(px, py - 20);
-  ctx.lineTo(px, py + 20);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawTrail(ctx, transform, trail) {
-  if (trail.length < 2) return;
-  ctx.save();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = "rgba(98, 196, 161, 0.58)";
-  ctx.beginPath();
-  trail.forEach((point, index) => {
-    const [x, y] = worldToScreen(transform, point[0], point[1]);
-    if (index === 0) ctx.moveTo(x, y);
-    else ctx.lineTo(x, y);
-  });
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawBody(ctx, transform, frame, robot) {
-  if (!frame?.pos || frame.pos.length < 2) return;
-  const x = frame.pos[0];
-  const y = frame.pos[1];
-  const yaw = frame.rot?.[2] || 0;
-  const bodyLength = robot?.body_length_m || 0.28;
-  const bodyWidth = robot?.body_width_m || 0.12;
-  const halfLength = bodyLength / 2;
-  const halfWidth = bodyWidth / 2;
-  const corners = [
-    [halfLength, halfWidth],
-    [halfLength, -halfWidth],
-    [-halfLength, -halfWidth],
-    [-halfLength, halfWidth],
-  ].map(([cx, cy]) => {
-    const cos = Math.cos(yaw);
-    const sin = Math.sin(yaw);
-    return [x + cx * cos - cy * sin, y + cx * sin + cy * cos];
-  });
-
-  ctx.save();
-  ctx.fillStyle = "#e8edf1";
-  ctx.strokeStyle = "#14191d";
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  corners.forEach(([wx, wy], index) => {
-    const [sx, sy] = worldToScreen(transform, wx, wy);
-    if (index === 0) ctx.moveTo(sx, sy);
-    else ctx.lineTo(sx, sy);
-  });
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-
-  const [noseX, noseY] = worldToScreen(transform, x + halfLength * Math.cos(yaw), y + halfLength * Math.sin(yaw));
-  const [centerX, centerY] = worldToScreen(transform, x, y);
-  ctx.strokeStyle = "#e06a4f";
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(centerX, centerY);
-  ctx.lineTo(noseX, noseY);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawLegs(ctx, transform, frame, robot) {
-  const legs = frame?.legs;
-  if (Array.isArray(legs) && legs.length > 0) {
-    ctx.save();
-    ctx.strokeStyle = "rgba(98, 196, 161, 0.9)";
-    ctx.fillStyle = "#62c4a1";
-    ctx.lineWidth = 2;
-    for (const leg of legs) {
-      const mount = leg?.mount;
-      const foot = leg?.foot;
-      if (!Array.isArray(mount) || !Array.isArray(foot)) continue;
-      const [mx, my] = worldToScreen(transform, mount[0], mount[1]);
-      const [fx, fy] = worldToScreen(transform, foot[0], foot[1]);
-      ctx.beginPath();
-      ctx.moveTo(mx, my);
-      ctx.lineTo(fx, fy);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(fx, fy, 3.2, 0, Math.PI * 2);
-      ctx.fill();
-    }
-    ctx.restore();
-    return;
-  }
-
-  if (!frame?.pos || !Array.isArray(frame.leg)) return;
-  const yaw = frame.rot?.[2] || 0;
-  const bodyLength = robot?.body_length_m || 0.28;
-  const bodyWidth = robot?.body_width_m || 0.12;
-  const legLength = robot?.leg_length_m || 0.16;
-  const mounts = [
-    [bodyLength / 2, bodyWidth / 2],
-    [bodyLength / 2, -bodyWidth / 2],
-    [-bodyLength / 2, bodyWidth / 2],
-    [-bodyLength / 2, -bodyWidth / 2],
-  ];
-
-  ctx.save();
-  ctx.strokeStyle = "rgba(98, 196, 161, 0.8)";
-  ctx.lineWidth = 2;
-  for (let index = 0; index < mounts.length; index += 1) {
-    const [mxBody, myBody] = mounts[index];
-    const angle = frame.leg[index] || 0;
-    const footBody = [mxBody + Math.sin(angle) * legLength, myBody];
-    const cos = Math.cos(yaw);
-    const sin = Math.sin(yaw);
-    const mount = [
-      frame.pos[0] + mxBody * cos - myBody * sin,
-      frame.pos[1] + mxBody * sin + myBody * cos,
-    ];
-    const foot = [
-      frame.pos[0] + footBody[0] * cos - footBody[1] * sin,
-      frame.pos[1] + footBody[0] * sin + footBody[1] * cos,
-    ];
-    const [mx, my] = worldToScreen(transform, mount[0], mount[1]);
-    const [fx, fy] = worldToScreen(transform, foot[0], foot[1]);
-    ctx.beginPath();
-    ctx.moveTo(mx, my);
-    ctx.lineTo(fx, fy);
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
+function terrainHalf(terrain) {
+  return Math.max(terrain?.field_half_m || DEFAULT_METADATA.terrain.field_half_m, 1.0);
+}
+
+function terrainHeightAt(terrain, x, y) {
+  const activeTerrain = terrain || DEFAULT_METADATA.terrain;
+  const floor = Number(activeTerrain.floor_height_m || 0.0);
+  if (activeTerrain.kind === "flat") return floor;
+  const radius = Math.max(Math.abs(x), Math.abs(y));
+  const centerHalf = Number(activeTerrain.center_half_m || 0);
+  if (radius <= centerHalf) return floor;
+  const stepWidth = Math.max(Number(activeTerrain.step_width_m || 1.0), 1e-6);
+  const rawStep = (radius - centerHalf) / stepWidth;
+  const stepIndex = Math.min(Math.max(Math.floor(rawStep + 1e-6), 0), Number(activeTerrain.step_count || 0));
+  return floor + stepIndex * Number(activeTerrain.step_height_m || 0.0);
+}
+
+function worldToSceneVector(x = 0, y = 0, z = 0) {
+  return new THREE.Vector3(Number(x), Number(z), -Number(y));
+}
+
+function disposeObject3D(root) {
+  root.traverse((child) => {
+    if (child.geometry) child.geometry.dispose();
+    if (Array.isArray(child.material)) {
+      for (const material of child.material) material.dispose();
+    } else if (child.material) {
+      child.material.dispose();
+    }
+  });
+}
+
+function buildTerrainGroup(terrain) {
+  const activeTerrain = terrain || DEFAULT_METADATA.terrain;
+  const group = new THREE.Group();
+  const floorHeight = Number(activeTerrain.floor_height_m || 0.0);
+  const half = terrainHalf(activeTerrain);
+
+  const base = new THREE.Mesh(
+    new THREE.PlaneGeometry(half * 2, half * 2),
+    new THREE.MeshStandardMaterial({ color: 0x111920, roughness: 0.95, metalness: 0.05 })
+  );
+  base.rotation.x = -Math.PI / 2;
+  base.position.y = floorHeight;
+  base.receiveShadow = true;
+  group.add(base);
+
+  const boundaryPoints = [
+    worldToSceneVector(-half, -half, floorHeight + 0.002),
+    worldToSceneVector(half, -half, floorHeight + 0.002),
+    worldToSceneVector(half, half, floorHeight + 0.002),
+    worldToSceneVector(-half, half, floorHeight + 0.002),
+    worldToSceneVector(-half, -half, floorHeight + 0.002),
+  ];
+  const boundary = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(boundaryPoints),
+    new THREE.LineBasicMaterial({ color: 0xdde2e8 })
+  );
+  group.add(boundary);
+
+  if (activeTerrain.kind === "stepped_arena") {
+    for (let level = 1; level <= Number(activeTerrain.step_count || 0); level += 1) {
+      const inner = Number(activeTerrain.center_half_m || 0) + ((level - 1) * Number(activeTerrain.step_width_m || 1));
+      const outer = Number(activeTerrain.center_half_m || 0) + (level * Number(activeTerrain.step_width_m || 1));
+      const top = floorHeight + (level * Number(activeTerrain.step_height_m || 0));
+      const halfHeight = Math.max((top - floorHeight) * 0.5, 0.001);
+      const centerZ = floorHeight + halfHeight;
+      const stripHalf = Math.max((outer - inner) * 0.5, 0.001);
+      const color = STEP_COLORS[Math.min(level - 1, STEP_COLORS.length - 1)];
+      const material = new THREE.MeshStandardMaterial({
+        color,
+        roughness: 0.9,
+        metalness: 0.03,
+        transparent: true,
+        opacity: 0.88,
+      });
+
+      const north = new THREE.Mesh(new THREE.BoxGeometry(outer * 2, halfHeight * 2, stripHalf * 2), material);
+      north.position.copy(worldToSceneVector(0, (inner + outer) * 0.5, centerZ));
+      north.receiveShadow = true;
+      north.castShadow = true;
+      group.add(north);
+
+      const south = new THREE.Mesh(new THREE.BoxGeometry(outer * 2, halfHeight * 2, stripHalf * 2), material.clone());
+      south.position.copy(worldToSceneVector(0, -((inner + outer) * 0.5), centerZ));
+      south.receiveShadow = true;
+      south.castShadow = true;
+      group.add(south);
+
+      const east = new THREE.Mesh(new THREE.BoxGeometry(stripHalf * 2, halfHeight * 2, inner * 2), material.clone());
+      east.position.copy(worldToSceneVector((inner + outer) * 0.5, 0, centerZ));
+      east.receiveShadow = true;
+      east.castShadow = true;
+      group.add(east);
+
+      const west = new THREE.Mesh(new THREE.BoxGeometry(stripHalf * 2, halfHeight * 2, inner * 2), material.clone());
+      west.position.copy(worldToSceneVector(-((inner + outer) * 0.5), 0, centerZ));
+      west.receiveShadow = true;
+      west.castShadow = true;
+      group.add(west);
+    }
+  }
+
+  const gridDivisions = Math.max(Math.round(half * 2), 8);
+  const grid = new THREE.GridHelper(half * 2, gridDivisions, 0x7f95a8, 0x394754);
+  grid.position.y = floorHeight + 0.004;
+  group.add(grid);
+
+  return group;
+}
+
+function buildRobotGroup(robot) {
+  const activeRobot = robot || DEFAULT_METADATA.robot;
+  const group = new THREE.Group();
+
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(
+      Number(activeRobot.body_length_m || DEFAULT_METADATA.robot.body_length_m),
+      Number(activeRobot.body_height_m || DEFAULT_METADATA.robot.body_height_m),
+      Number(activeRobot.body_width_m || DEFAULT_METADATA.robot.body_width_m)
+    ),
+    new THREE.MeshStandardMaterial({ color: 0xced7df, metalness: 0.08, roughness: 0.35 })
+  );
+  body.castShadow = true;
+  body.receiveShadow = true;
+  group.add(body);
+
+  const nose = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0.2, 0, 0)]),
+    new THREE.LineBasicMaterial({ color: 0xe5714f })
+  );
+  group.add(nose);
+
+  const legVisuals = [];
+  for (let i = 0; i < 4; i += 1) {
+    const line = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineBasicMaterial({ color: 0x62c4a1 })
+    );
+    const foot = new THREE.Mesh(
+      new THREE.SphereGeometry(Math.max(Number(activeRobot.foot_radius_m || 0.01), 0.008), 12, 12),
+      new THREE.MeshStandardMaterial({ color: 0x62c4a1, roughness: 0.45, metalness: 0.05 })
+    );
+    const mount = new THREE.Mesh(
+      new THREE.SphereGeometry(0.008, 10, 10),
+      new THREE.MeshStandardMaterial({ color: 0x88d5be, roughness: 0.55, metalness: 0.02 })
+    );
+    foot.castShadow = true;
+    mount.castShadow = true;
+    group.add(line);
+    group.add(foot);
+    group.add(mount);
+    legVisuals.push({ line, foot, mount });
+  }
+
+  group.userData.body = body;
+  group.userData.nose = nose;
+  group.userData.legs = legVisuals;
+  return group;
+}
+
+function applyRobotFrame(robotGroup, frame, axisTransform) {
+  if (!robotGroup || !frame) return;
+
+  const body = robotGroup.userData.body;
+  const nose = robotGroup.userData.nose;
+  const legs = robotGroup.userData.legs || [];
+
+  const pos = Array.isArray(frame.pos) ? frame.pos : [0, 0, 0];
+  const rot = Array.isArray(frame.rot) ? frame.rot : [0, 0, 0];
+  body.position.copy(worldToSceneVector(pos[0], pos[1], pos[2]));
+
+  const worldQuat = new THREE.Quaternion().setFromEuler(
+    new THREE.Euler(Number(rot[0] || 0), Number(rot[1] || 0), Number(rot[2] || 0), "XYZ")
+  );
+  const sceneQuat = axisTransform.toScene.clone().multiply(worldQuat).multiply(axisTransform.toWorld);
+  body.quaternion.copy(sceneQuat);
+
+  const halfLength = body.geometry.parameters.width * 0.5;
+  nose.geometry.setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(halfLength, 0, 0)]);
+  nose.position.copy(body.position);
+  nose.quaternion.copy(body.quaternion);
+
+  const frameLegs = Array.isArray(frame.legs) ? frame.legs : [];
+  for (let i = 0; i < legs.length; i += 1) {
+    const visual = legs[i];
+    const leg = frameLegs[i];
+    if (!leg || !Array.isArray(leg.mount) || !Array.isArray(leg.foot)) {
+      visual.line.visible = false;
+      visual.foot.visible = false;
+      visual.mount.visible = false;
+      continue;
+    }
+
+    const mount = worldToSceneVector(leg.mount[0], leg.mount[1], leg.mount[2]);
+    const foot = worldToSceneVector(leg.foot[0], leg.foot[1], leg.foot[2]);
+    visual.line.visible = true;
+    visual.foot.visible = true;
+    visual.mount.visible = true;
+    visual.line.geometry.setFromPoints([mount, foot]);
+    visual.foot.position.copy(foot);
+    visual.mount.position.copy(mount);
+  }
+}
+
+function applyGoal(goalMesh, goal) {
+  if (!goalMesh) return;
+  if (!Array.isArray(goal) || goal.length < 2) {
+    goalMesh.visible = false;
+    return;
+  }
+
+  const gx = Number(goal[0]);
+  const gy = Number(goal[1]);
+  const gz = Number(goal[2] || 0.0);
+  goalMesh.visible = true;
+  goalMesh.position.copy(worldToSceneVector(gx, gy, gz + 0.01));
+}
+
+function applyTrail(trailLine, trail, terrain) {
+  if (!trailLine) return;
+  if (!Array.isArray(trail) || trail.length < 2) {
+    trailLine.visible = false;
+    return;
+  }
+
+  const points = trail.map(([x, y]) => {
+    const z = terrainHeightAt(terrain, x, y) + 0.03;
+    return worldToSceneVector(x, y, z);
+  });
+  trailLine.visible = true;
+  trailLine.geometry.setFromPoints(points);
+}
+
 export default function App() {
-  const canvasRef = useRef(null);
+  const viewportRef = useRef(null);
   const socketRef = useRef(null);
   const frameQueueRef = useRef([]);
   const lastFrameAdvanceRef = useRef(0);
   const streamRef = useRef(null);
   const trailRef = useRef([]);
   const lastTrailFrameRef = useRef(null);
+  const sceneRef = useRef(null);
+  const pointerGestureRef = useRef({ x: 0, y: 0, moved: false });
+
   const [connected, setConnected] = useState(false);
   const [metadata, setMetadata] = useState(DEFAULT_METADATA);
   const [models, setModels] = useState([]);
@@ -317,6 +325,11 @@ export default function App() {
   const [status, setStatus] = useState(null);
   const [goal, setGoal] = useState(null);
   const [bufferDepth, setBufferDepth] = useState(0);
+
+  const axisTransform = useMemo(() => {
+    const toScene = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2);
+    return { toScene, toWorld: toScene.clone().invert() };
+  }, []);
 
   function sendMessage(payload) {
     if (socketRef.current?.readyState === WebSocket.OPEN) {
@@ -346,14 +359,43 @@ export default function App() {
     sendMessage({ type: "set_goal", goal: nextGoal });
   }
 
-  function handleCanvasPointerUp(event) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const terrain = metadata.terrain || DEFAULT_METADATA.terrain;
-    const transform = mapTransform(rect.width, rect.height, terrain);
-    const [worldX, worldY] = screenToWorld(transform, event.clientX - rect.left, event.clientY - rect.top);
+  function pickWorldGoal(clientX, clientY) {
+    const state = sceneRef.current;
+    if (!state) return;
+
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+
+    state.raycaster.setFromCamera(ndc, state.camera);
+    const floor = Number((metadata.terrain || DEFAULT_METADATA.terrain).floor_height_m || 0);
+    const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -floor);
+    const hit = new THREE.Vector3();
+    if (!state.raycaster.ray.intersectPlane(plane, hit)) return;
+
+    const worldX = hit.x;
+    const worldY = -hit.z;
     placeGoal(worldX, worldY);
+  }
+
+  function handlePointerDown(event) {
+    pointerGestureRef.current = { x: event.clientX, y: event.clientY, moved: false };
+  }
+
+  function handlePointerMove(event) {
+    const dx = event.clientX - pointerGestureRef.current.x;
+    const dy = event.clientY - pointerGestureRef.current.y;
+    if ((dx * dx) + (dy * dy) > (CLICK_MOVE_TOLERANCE_PX * CLICK_MOVE_TOLERANCE_PX)) {
+      pointerGestureRef.current.moved = true;
+    }
+  }
+
+  function handlePointerUp(event) {
+    if (!pointerGestureRef.current.moved) {
+      pickWorldGoal(event.clientX, event.clientY);
+    }
   }
 
   useEffect(() => {
@@ -436,71 +478,171 @@ export default function App() {
   }, [metadata.training?.brain_dt_s]);
 
   useEffect(() => {
-    let cancelled = false;
+    const container = viewportRef.current;
+    if (!container) return;
 
-    function render() {
-      if (cancelled) return;
-      const canvas = canvasRef.current;
-      if (!canvas) {
-        window.requestAnimationFrame(render);
-        return;
-      }
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0d1319);
 
-      const width = window.innerWidth;
-      const height = window.innerHeight;
-      if (canvas.width !== width) canvas.width = width;
-      if (canvas.height !== height) canvas.height = height;
-      const ctx = canvas.getContext("2d");
-      const terrain = metadata.terrain || DEFAULT_METADATA.terrain;
-      const robot = metadata.robot || DEFAULT_METADATA.robot;
-      const transform = mapTransform(width, height, terrain);
-      const activeGoal = goal || frame?.goal || status?.goal || metadata.goal?.fixed_goal_xyz;
+    const camera = new THREE.PerspectiveCamera(52, 1, 0.05, 250);
+    camera.position.set(9, 6.4, 9.5);
 
-      if (frame?.pos && frame !== lastTrailFrameRef.current) {
-        trailRef.current.push([frame.pos[0], frame.pos[1]]);
-        if (trailRef.current.length > TRAIL_LIMIT) trailRef.current.shift();
-        lastTrailFrameRef.current = frame;
-      }
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    container.appendChild(renderer.domElement);
 
-      ctx.fillStyle = "#0e1114";
-      ctx.fillRect(0, 0, width, height);
-      drawArena(ctx, transform, terrain);
-      drawTrail(ctx, transform, trailRef.current);
-      drawGoal(ctx, transform, activeGoal);
-      drawLegs(ctx, transform, frame, robot);
-      drawBody(ctx, transform, frame, robot);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.target.set(0, 0.6, 0);
+    controls.minDistance = 1.4;
+    controls.maxDistance = 70;
+    controls.maxPolarAngle = Math.PI * 0.495;
 
-      if (!frame) {
-        ctx.fillStyle = "#9aa4ad";
-        ctx.font = "16px ui-monospace, SFMono-Regular, Menlo, monospace";
-        ctx.textAlign = "center";
-        ctx.fillText(connected ? "Waiting for replay frames" : `Connecting to ${WS_URL}`, width / 2, height / 2);
-        ctx.textAlign = "left";
-      }
+    const ambient = new THREE.HemisphereLight(0xb8d4f1, 0x263241, 0.82);
+    scene.add(ambient);
 
-      window.requestAnimationFrame(render);
+    const key = new THREE.DirectionalLight(0xffffff, 0.95);
+    key.position.set(12, 16, 8);
+    key.castShadow = true;
+    key.shadow.mapSize.set(1024, 1024);
+    key.shadow.camera.near = 0.5;
+    key.shadow.camera.far = 60;
+    key.shadow.camera.left = -22;
+    key.shadow.camera.right = 22;
+    key.shadow.camera.top = 22;
+    key.shadow.camera.bottom = -22;
+    scene.add(key);
+
+    const world = new THREE.Group();
+    scene.add(world);
+
+    const terrainGroup = buildTerrainGroup(metadata.terrain || DEFAULT_METADATA.terrain);
+    world.add(terrainGroup);
+
+    const trailLine = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
+      new THREE.LineBasicMaterial({ color: 0x62c4a1, transparent: true, opacity: 0.72 })
+    );
+    trailLine.visible = false;
+    world.add(trailLine);
+
+    const robotGroup = buildRobotGroup(metadata.robot || DEFAULT_METADATA.robot);
+    world.add(robotGroup);
+
+    const goalGroup = new THREE.Group();
+    const goalRing = new THREE.Mesh(
+      new THREE.TorusGeometry(0.24, 0.03, 12, 42),
+      new THREE.MeshStandardMaterial({ color: 0xf0b84f, emissive: 0xa36f1d, emissiveIntensity: 0.25 })
+    );
+    goalRing.rotation.x = Math.PI / 2;
+    const goalPin = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.02, 0.02, 0.32, 10),
+      new THREE.MeshStandardMaterial({ color: 0xf0b84f, roughness: 0.3, metalness: 0.08 })
+    );
+    goalPin.position.y = 0.16;
+    goalGroup.add(goalRing);
+    goalGroup.add(goalPin);
+    goalGroup.visible = false;
+    world.add(goalGroup);
+
+    const raycaster = new THREE.Raycaster();
+
+    function resize() {
+      const rect = container.getBoundingClientRect();
+      const width = Math.max(1, Math.floor(rect.width));
+      const height = Math.max(1, Math.floor(rect.height));
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      renderer.setSize(width, height, false);
     }
 
-    window.requestAnimationFrame(render);
-    return () => {
-      cancelled = true;
+    resize();
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(container);
+
+    let rafId = 0;
+    const renderLoop = () => {
+      controls.update();
+      renderer.render(scene, camera);
+      rafId = window.requestAnimationFrame(renderLoop);
     };
-  }, [connected, frame, goal, metadata, status]);
+    rafId = window.requestAnimationFrame(renderLoop);
+
+    sceneRef.current = {
+      scene,
+      camera,
+      renderer,
+      controls,
+      world,
+      terrainGroup,
+      trailLine,
+      robotGroup,
+      goalGroup,
+      raycaster,
+      resizeObserver,
+      rafId,
+    };
+
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      resizeObserver.disconnect();
+      controls.dispose();
+      disposeObject3D(scene);
+      renderer.dispose();
+      if (renderer.domElement.parentNode === container) {
+        container.removeChild(renderer.domElement);
+      }
+      if (sceneRef.current?.scene === scene) {
+        sceneRef.current = null;
+      }
+    };
+  }, [axisTransform, metadata.robot, metadata.terrain]);
+
+  useEffect(() => {
+    const state = sceneRef.current;
+    if (!state) return;
+
+    const activeGoal = goal || frame?.goal || status?.goal || metadata.goal?.fixed_goal_xyz;
+
+    if (frame?.pos && frame !== lastTrailFrameRef.current) {
+      trailRef.current.push([frame.pos[0], frame.pos[1]]);
+      if (trailRef.current.length > TRAIL_LIMIT) trailRef.current.shift();
+      lastTrailFrameRef.current = frame;
+    }
+
+    applyRobotFrame(state.robotGroup, frame, axisTransform);
+    applyTrail(state.trailLine, trailRef.current, metadata.terrain || DEFAULT_METADATA.terrain);
+    applyGoal(state.goalGroup, activeGoal);
+
+    if (frame?.pos) {
+      const anchor = worldToSceneVector(frame.pos[0], frame.pos[1], frame.pos[2] || 0);
+      state.controls.target.lerp(anchor, 0.18);
+    }
+  }, [axisTransform, frame, goal, metadata.goal?.fixed_goal_xyz, metadata.terrain, status?.goal]);
 
   const activeModel = models.find((model) => model.id === selectedModelId);
   const checkpointLoaded = basename(status?.checkpoint_loaded || activeModel?.checkpoint_path);
-  const simulatorBackend = status?.simulator_backend || metadata.simulator?.backend || "unified";
+  const simulatorBackend = status?.simulator_backend || metadata.simulator?.backend || "mujoco";
   const viewerResetSeconds = metadata.training?.viewer_reset_s ?? DEFAULT_METADATA.training.viewer_reset_s;
   const remainingReset = Math.max(0, viewerResetSeconds - (frame?.time_s ?? 0));
 
   return (
     <div className="app-shell">
-      <canvas ref={canvasRef} className="arena-canvas" onPointerUp={handleCanvasPointerUp} />
+      <div
+        ref={viewportRef}
+        className="viewer-viewport"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+      />
 
       <aside className="control-panel">
         <div className="panel-header">
           <div>
-            <span className="eyebrow">Quadruped Reward Map</span>
+            <span className="eyebrow">Quadruped 3D Viewer</span>
             <h1>Live Replay</h1>
           </div>
           <div className="connection-state">
@@ -551,6 +693,10 @@ export default function App() {
         <div className="target-row">
           <span>Config</span>
           <strong>{metadata.config_name}</strong>
+        </div>
+        <div className="target-row">
+          <span>Controls</span>
+          <strong>drag orbit, click set goal</strong>
         </div>
       </aside>
     </div>

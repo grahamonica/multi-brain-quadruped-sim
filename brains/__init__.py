@@ -9,8 +9,6 @@ _TRAINER_EXPORTS = {
     "JaxESTrainer",
     "TrainingState",
     "apply_runtime_spec",
-    "current_environment_model",
-    "current_robot_model",
     "current_runtime_spec",
 }
 

@@ -1,14 +1,14 @@
 # Frontend
 
-React + Vite viewer for the quadruped websocket streams.
+React + Vite 3D viewer for the quadruped websocket streams.
 
 ## What It Does
 
 - connects to `ws://localhost:8000/ws` locally or `VITE_WS_URL` in hosted builds
-- renders arena geometry and robot geometry from backend metadata
+- renders the arena and robot in interactive 3D from backend metadata
 - renders selected-model replay frames from the viewer service
 - queues frame batches locally so playback stays smooth
-- lets the user select saved model artifacts and place reward targets on the map
+- lets the user orbit/pan/zoom the camera, select saved model artifacts, and place reward targets by clicking the scene
 - shows generation metrics, checkpoint metadata, and buffer status
 
 ## Run

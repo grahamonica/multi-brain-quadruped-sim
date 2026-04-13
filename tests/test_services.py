@@ -39,14 +39,14 @@ class ServiceImportTests(unittest.TestCase):
 
             self.assertEqual(resolve_viewer_checkpoint(root), root / "latest.npz")
 
-    def test_checkpoint_resolution_allows_backend_only_difference(self) -> None:
-        jax_spec = load_runtime_spec(PROJECT_ROOT / "configs" / "smoke.yaml")
+    def test_checkpoint_resolution_allows_legacy_backend_only_difference(self) -> None:
+        spec = load_runtime_spec(PROJECT_ROOT / "configs" / "smoke.yaml")
         with TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
-            _write_checkpoint(root / "latest.npz", PROJECT_ROOT / "configs" / "smoke.yaml", simulator_backend="mujoco")
+            _write_checkpoint(root / "latest.npz", PROJECT_ROOT / "configs" / "smoke.yaml", simulator_backend="unified")
             _write_checkpoint(root / "best.npz", PROJECT_ROOT / "configs" / "smoke.yaml")
 
-            self.assertEqual(resolve_viewer_checkpoint(root, spec=jax_spec), root / "latest.npz")
+            self.assertEqual(resolve_viewer_checkpoint(root, spec=spec), root / "latest.npz")
 
 
 if __name__ == "__main__":

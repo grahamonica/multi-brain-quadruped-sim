@@ -15,7 +15,17 @@ import numpy as np
 from brains.config import RuntimeSpec, canonical_config_json, config_json_matches_checkpoint, default_runtime_spec
 from brains.models import get_model_definition
 from brains.sim.mujoco_backend import MuJoCoBackend
-from quadruped import LEG_ROTATION_AXIS_BODY, QuadrupedRobot, SimulationEnvironment
+from brains.sim.mujoco_layout import (
+    LEG_NAMES,
+    LEG_ROTATION_AXIS_BODY,
+    body_corners_body,
+    body_half_extents,
+    body_principal_inertia,
+    leg_body_fractions,
+    leg_inertia_about_mount,
+    mount_points_body,
+    total_robot_mass_kg,
+)
 
 
 # Robot / physics constants mirror the current KT2-style defaults.
@@ -24,9 +34,8 @@ N_OUT = 4
 N_HIDDEN_LAYERS = 4
 SHARED_TRUNK_WIDTH = 32
 MOTOR_LANE_WIDTH = 32
-N_LEGS = 4
+N_LEGS = len(LEG_NAMES)
 N_BODY_CORNERS = 8
-LEG_NAMES = ("front_left", "front_right", "rear_left", "rear_right")
 
 BODY_LENGTH_M = 0.28
 BODY_WIDTH_M = 0.12
@@ -150,8 +159,6 @@ BODY_CORNERS_BODY = jnp.array(
 LEG_BODY_FRACTIONS = jnp.array([0.25, 0.50, 0.75], dtype=jnp.float32)
 
 ACTIVE_SPEC: RuntimeSpec = default_runtime_spec()
-ACTIVE_ROBOT_MODEL: QuadrupedRobot = QuadrupedRobot.from_runtime_spec(ACTIVE_SPEC)
-ACTIVE_ENVIRONMENT_MODEL: SimulationEnvironment = SimulationEnvironment.from_runtime_spec(ACTIVE_SPEC)
 
 
 class BrainState(NamedTuple):
@@ -217,17 +224,8 @@ def current_runtime_spec() -> RuntimeSpec:
     return ACTIVE_SPEC
 
 
-def current_robot_model() -> QuadrupedRobot:
-    return ACTIVE_ROBOT_MODEL
-
-
-def current_environment_model() -> SimulationEnvironment:
-    return ACTIVE_ENVIRONMENT_MODEL
-
-
 def apply_runtime_spec(spec: RuntimeSpec | None = None) -> RuntimeSpec:
     global ACTIVE_SPEC
-    global ACTIVE_ROBOT_MODEL, ACTIVE_ENVIRONMENT_MODEL
     global BODY_LENGTH_M, BODY_WIDTH_M, BODY_HEIGHT_M, BODY_MASS_KG
     global LEG_LENGTH_M, LEG_MASS_KG, LEG_RADIUS_M, FOOT_RADIUS_M, ELASTIC_DEFORMATION_M, N_LEG_BODY_SAMPLES
     global FOOT_STATIC_FRICTION, FOOT_KINETIC_FRICTION, BODY_CONTACT_FRICTION
@@ -246,45 +244,40 @@ def apply_runtime_spec(spec: RuntimeSpec | None = None) -> RuntimeSpec:
     global MAX_SUBSTEP_S, UNLOADING_STIFFNESS_SCALE, SLEEP_LINEAR_SPEED_THRESHOLD_M_S
     global SLEEP_ANGULAR_SPEED_THRESHOLD_RAD_S, TOTAL_MASS_KG, BODY_HALF_EXTENTS, BODY_PRINCIPAL_INERTIA
     global LEG_INERTIA_ABOUT_MOUNT, REST_CONTACT_BUFFER_M, SUBSTEP_COUNT, SUBSTEP_DT_S, MOUNT_POINTS_BODY
-    global BODY_CORNERS_BODY, LEG_BODY_FRACTIONS, LEG_NAMES, LEG_ROT_AXIS_BODY
+    global BODY_CORNERS_BODY, LEG_BODY_FRACTIONS, LEG_ROT_AXIS_BODY
 
     runtime_spec = spec or default_runtime_spec()
     runtime_spec.validate()
     ACTIVE_SPEC = runtime_spec
-    ACTIVE_ROBOT_MODEL = QuadrupedRobot.from_runtime_spec(runtime_spec)
-    ACTIVE_ENVIRONMENT_MODEL = SimulationEnvironment.from_runtime_spec(runtime_spec)
+    robot = runtime_spec.robot
+    terrain = runtime_spec.terrain
+    goals = runtime_spec.goals
+    friction = runtime_spec.friction
+    physics = runtime_spec.physics
+    episode = runtime_spec.episode
+    reward = runtime_spec.reward
+    training = runtime_spec.training
 
-    body = ACTIVE_ROBOT_MODEL.body
-    motor = ACTIVE_ROBOT_MODEL.motor
-    legs = ACTIVE_ROBOT_MODEL.legs
-    terrain = ACTIVE_ENVIRONMENT_MODEL.terrain
-    task = ACTIVE_ENVIRONMENT_MODEL.task
-    physics = ACTIVE_ENVIRONMENT_MODEL.physics
-    episode = ACTIVE_ENVIRONMENT_MODEL.episode
-    reward = ACTIVE_ENVIRONMENT_MODEL.reward
-    training = ACTIVE_ENVIRONMENT_MODEL.training
+    BODY_LENGTH_M = float(robot.body_length_m)
+    BODY_WIDTH_M = float(robot.body_width_m)
+    BODY_HEIGHT_M = float(robot.body_height_m)
+    BODY_MASS_KG = float(robot.body_mass_kg)
+    LEG_LENGTH_M = float(robot.leg_length_m)
+    LEG_MASS_KG = float(robot.leg_mass_kg)
+    LEG_RADIUS_M = float(robot.leg_radius_m)
+    FOOT_RADIUS_M = float(robot.foot_radius_m)
+    ELASTIC_DEFORMATION_M = float(robot.elastic_deformation_m)
+    N_LEG_BODY_SAMPLES = int(robot.leg_body_samples)
 
-    BODY_LENGTH_M = float(body.length_m)
-    BODY_WIDTH_M = float(body.width_m)
-    BODY_HEIGHT_M = float(body.height_m)
-    BODY_MASS_KG = float(body.mass_kg)
-    LEG_LENGTH_M = float(legs[0].length_m)
-    LEG_MASS_KG = float(legs[0].mass_kg)
-    LEG_RADIUS_M = float(legs[0].radius_m)
-    FOOT_RADIUS_M = float(legs[0].foot_radius_m)
-    ELASTIC_DEFORMATION_M = float(legs[0].elastic_deformation_m)
-    N_LEG_BODY_SAMPLES = int(legs[0].body_contact_samples)
-    LEG_NAMES = ACTIVE_ROBOT_MODEL.leg_names
+    FOOT_STATIC_FRICTION = float(friction.foot_static)
+    FOOT_KINETIC_FRICTION = float(friction.foot_kinetic)
+    BODY_CONTACT_FRICTION = float(friction.body)
 
-    FOOT_STATIC_FRICTION = float(legs[0].static_friction)
-    FOOT_KINETIC_FRICTION = float(legs[0].kinetic_friction)
-    BODY_CONTACT_FRICTION = float(body.contact_friction)
-
-    MOTOR_SCALE = float(motor.control_scale_rad_s)
-    MAX_MOTOR_RAD_S = float(motor.max_velocity_rad_s)
-    MOTOR_MAX_ANGULAR_ACCELERATION_RAD_S2 = float(motor.max_angular_acceleration_rad_s2)
-    MOTOR_VISCOUS_DAMPING_PER_S = float(motor.viscous_damping_per_s)
-    MOTOR_VELOCITY_FILTER_TAU_S = float(motor.velocity_filter_tau_s)
+    MOTOR_SCALE = float(robot.motor_scale)
+    MAX_MOTOR_RAD_S = float(robot.max_motor_rad_s)
+    MOTOR_MAX_ANGULAR_ACCELERATION_RAD_S2 = float(robot.motor_max_angular_acceleration_rad_s2)
+    MOTOR_VISCOUS_DAMPING_PER_S = float(robot.motor_viscous_damping_per_s)
+    MOTOR_VELOCITY_FILTER_TAU_S = float(robot.motor_velocity_filter_tau_s)
 
     DT = float(episode.neuron_dt_s)
     BRAIN_DT = float(episode.brain_dt_s)
@@ -298,7 +291,7 @@ def apply_runtime_spec(spec: RuntimeSpec | None = None) -> RuntimeSpec:
     SELECTION_BOT_FRAC = float(episode.selection_bot_frac)
     GOAL_REACHED_RADIUS_M = float(episode.goal_reached_radius_m)
 
-    GOAL_HEIGHT_M = float(task.goal_height_m)
+    GOAL_HEIGHT_M = float(goals.height_m)
     FIELD_HALF = float(terrain.field_half_m)
     POP_SIZE = int(training.population_size)
     SIGMA = float(training.sigma)
@@ -343,17 +336,17 @@ def apply_runtime_spec(spec: RuntimeSpec | None = None) -> RuntimeSpec:
     SLEEP_LINEAR_SPEED_THRESHOLD_M_S = float(physics.sleep_linear_speed_threshold_m_s)
     SLEEP_ANGULAR_SPEED_THRESHOLD_RAD_S = float(physics.sleep_angular_speed_threshold_rad_s)
 
-    TOTAL_MASS_KG = float(ACTIVE_ROBOT_MODEL.total_mass_kg)
-    BODY_HALF_EXTENTS = jnp.asarray(body.half_extents_m, dtype=jnp.float32)
-    BODY_PRINCIPAL_INERTIA = jnp.asarray(body.principal_inertia, dtype=jnp.float32)
-    LEG_INERTIA_ABOUT_MOUNT = jnp.asarray(ACTIVE_ROBOT_MODEL.leg_inertia_about_mount, dtype=jnp.float32)
+    TOTAL_MASS_KG = float(total_robot_mass_kg(runtime_spec))
+    BODY_HALF_EXTENTS = jnp.asarray(body_half_extents(runtime_spec), dtype=jnp.float32)
+    BODY_PRINCIPAL_INERTIA = jnp.asarray(body_principal_inertia(runtime_spec), dtype=jnp.float32)
+    LEG_INERTIA_ABOUT_MOUNT = jnp.asarray(leg_inertia_about_mount(runtime_spec), dtype=jnp.float32)
     LEG_ROT_AXIS_BODY = jnp.asarray(LEG_ROTATION_AXIS_BODY, dtype=jnp.float32)
     REST_CONTACT_BUFFER_M = (TOTAL_MASS_KG * GRAVITY_M_S2) / (max(N_LEGS, 1) * NORMAL_STIFFNESS_N_M)
     SUBSTEP_COUNT = int(math.ceil(BRAIN_DT / MAX_SUBSTEP_S))
     SUBSTEP_DT_S = BRAIN_DT / SUBSTEP_COUNT
-    MOUNT_POINTS_BODY = jnp.asarray(ACTIVE_ROBOT_MODEL.mount_points_body, dtype=jnp.float32)
-    BODY_CORNERS_BODY = jnp.asarray(ACTIVE_ROBOT_MODEL.body_corners_body, dtype=jnp.float32)
-    LEG_BODY_FRACTIONS = jnp.asarray(ACTIVE_ROBOT_MODEL.leg_body_fractions, dtype=jnp.float32)
+    MOUNT_POINTS_BODY = jnp.asarray(mount_points_body(runtime_spec), dtype=jnp.float32)
+    BODY_CORNERS_BODY = jnp.asarray(body_corners_body(runtime_spec), dtype=jnp.float32)
+    LEG_BODY_FRACTIONS = jnp.asarray(leg_body_fractions(runtime_spec), dtype=jnp.float32)
     jax.clear_caches()
     return ACTIVE_SPEC
 
@@ -1265,7 +1258,7 @@ class ESTrainer:
 
     @property
     def backend(self) -> str:
-        return "unified"
+        return "mujoco"
 
     @property
     def device_summary(self) -> str:
@@ -1538,7 +1531,5 @@ __all__ = [
     "ESTrainer",
     "JaxESTrainer",
     "apply_runtime_spec",
-    "current_environment_model",
-    "current_robot_model",
     "current_runtime_spec",
 ]

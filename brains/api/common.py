@@ -11,8 +11,8 @@ from fastapi import WebSocket
 
 from brains.config import RuntimeSpec
 from brains.models import list_model_definitions
-from quadruped import QuadrupedRobot, SimulationEnvironment
 from brains.sim import single_step_to_viewer_frame as translate_single_step_to_viewer_frame
+from brains.sim.mujoco_layout import LEG_NAMES, LEG_ROTATION_AXIS_BODY, mount_points_body
 
 
 VIEWER_RESET_SECONDS = 30.0
@@ -82,33 +82,33 @@ class BroadcastHub:
 
 
 def build_viewer_metadata(spec: RuntimeSpec, mode: str) -> ViewerMetadata:
-    robot_model = QuadrupedRobot.from_runtime_spec(spec)
-    environment_model = SimulationEnvironment.from_runtime_spec(spec)
     terrain = {
-        "kind": environment_model.terrain.kind,
-        "field_half_m": environment_model.terrain.field_half_m,
-        "center_half_m": environment_model.terrain.center_half_m,
-        "step_count": environment_model.terrain.step_count,
-        "step_width_m": environment_model.terrain.step_width_m,
-        "step_height_m": environment_model.terrain.step_height_m,
-        "floor_height_m": environment_model.terrain.floor_height_m,
+        "kind": spec.terrain.kind,
+        "field_half_m": spec.terrain.field_half_m,
+        "center_half_m": spec.terrain.center_half_m,
+        "step_count": spec.terrain.step_count,
+        "step_width_m": spec.terrain.step_width_m,
+        "step_height_m": spec.terrain.step_height_m,
+        "floor_height_m": spec.terrain.floor_height_m,
     }
+    mount_points = mount_points_body(spec)
+    rotation_axes = [list(LEG_ROTATION_AXIS_BODY) for _ in LEG_NAMES]
     robot = {
-        "body_length_m": robot_model.body.length_m,
-        "body_width_m": robot_model.body.width_m,
-        "body_height_m": robot_model.body.height_m,
-        "leg_length_m": robot_model.legs[0].length_m,
-        "leg_radius_m": robot_model.legs[0].radius_m,
-        "foot_radius_m": robot_model.legs[0].foot_radius_m,
-        "mount_points_body": [list(leg.mount_point_body) for leg in robot_model.legs],
-        "rotation_axes_body": [list(leg.rotation_axis_body) for leg in robot_model.legs],
-        "leg_names": list(robot_model.leg_names),
+        "body_length_m": spec.robot.body_length_m,
+        "body_width_m": spec.robot.body_width_m,
+        "body_height_m": spec.robot.body_height_m,
+        "leg_length_m": spec.robot.leg_length_m,
+        "leg_radius_m": spec.robot.leg_radius_m,
+        "foot_radius_m": spec.robot.foot_radius_m,
+        "mount_points_body": [list(point) for point in mount_points],
+        "rotation_axes_body": rotation_axes,
+        "leg_names": list(LEG_NAMES),
     }
     goal = {
-        "strategy": environment_model.task.goal_strategy,
-        "radius_m": environment_model.task.goal_radius_m,
-        "height_m": environment_model.task.goal_height_m,
-        "fixed_goal_xyz": list(environment_model.task.fixed_goal_xyz) if environment_model.task.fixed_goal_xyz is not None else None,
+        "strategy": spec.goals.strategy,
+        "radius_m": spec.goals.radius_m,
+        "height_m": spec.goals.height_m,
+        "fixed_goal_xyz": list(spec.goals.fixed_goal_xyz) if spec.goals.fixed_goal_xyz is not None else None,
     }
     model = {
         "active": spec.model.type,
@@ -118,11 +118,11 @@ def build_viewer_metadata(spec: RuntimeSpec, mode: str) -> ViewerMetadata:
         "registered": [definition.to_dict() for definition in list_model_definitions()],
     }
     training = {
-        "population_size": environment_model.training.population_size,
-        "episode_s": environment_model.episode.episode_s,
-        "selection_interval_s": environment_model.episode.selection_interval_s,
+        "population_size": spec.training.population_size,
+        "episode_s": spec.episode.episode_s,
+        "selection_interval_s": spec.episode.selection_interval_s,
         "viewer_reset_s": VIEWER_RESET_SECONDS,
-        "brain_dt_s": environment_model.episode.brain_dt_s,
+        "brain_dt_s": spec.episode.brain_dt_s,
     }
     simulator = {
         "backend": spec.simulator.backend,

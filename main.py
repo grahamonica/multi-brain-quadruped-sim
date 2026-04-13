@@ -1,4 +1,4 @@
-"""Start the unified viewer API and viewer app together."""
+"""Start the MuJoCo viewer API and viewer app together."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ VENV_PY = PROJECT / "venv" / "bin" / "python"
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Start the quadruped viewer API and viewer app.")
+    parser = argparse.ArgumentParser(description="Start the MuJoCo quadruped viewer API and viewer app.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Runtime config for the API process.")
     parser.add_argument("--seed", type=int, default=42, help="Trainer seed for the API process.")
     parser.add_argument("--api-port", type=int, default=8000, help="Port for the FastAPI websocket service.")
@@ -112,8 +112,19 @@ def _start_server(api_port: int, config: Path, seed: int) -> subprocess.Popen:
 def _start_frontend(viewer_port: int, api_port: int) -> subprocess.Popen:
     env = os.environ.copy()
     env["VITE_API_PORT"] = str(api_port)
+    env["VITE_WS_URL"] = f"ws://127.0.0.1:{api_port}/ws"
     return subprocess.Popen(
-        ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", str(viewer_port)],
+        [
+            "npm",
+            "run",
+            "dev",
+            "--",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(viewer_port),
+            "--strictPort",
+        ],
         cwd=VIEWER_APP,
         env=env,
     )
@@ -229,8 +240,8 @@ def main() -> None:
 
     print(f"Python          : {_PY}", flush=True)
     print(f"Config          : {args.config.resolve()}", flush=True)
-    print(f"Viewer API      : http://localhost:{args.api_port}", flush=True)
-    print(f"Viewer app      : http://localhost:{args.viewer_port}", flush=True)
+    print(f"Viewer API      : http://127.0.0.1:{args.api_port}", flush=True)
+    print(f"Viewer app      : http://127.0.0.1:{args.viewer_port}", flush=True)
     print("Press Ctrl-C to stop.\n", flush=True)
 
     while True:

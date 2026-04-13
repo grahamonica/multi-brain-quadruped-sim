@@ -1,0 +1,13 @@
+{
+  "models": [
+    {
+      "architecture": "shared_trunk_motor_lanes",
+      "description": "Local notebook variant of the current shared trunk ES trainer.",
+      "input_size": 48,
+      "output_size": 4,
+      "parameter_count": 48516,
+      "trainer": "openai_es",
+      "type": "notebook_shared_trunk_v1"
+    }
+  ]
+}
