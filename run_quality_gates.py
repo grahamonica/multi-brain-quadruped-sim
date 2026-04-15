@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from brains.config import DEFAULT_CONFIG_PATH, load_runtime_spec
-from brains.quality import QualityGateRunner, compare_regression_to_baseline
+from brains.runtime import QualityGateRunner, compare_regression_to_baseline
 
 
 def _parse_args() -> argparse.Namespace:

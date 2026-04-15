@@ -9,9 +9,16 @@ from dataclasses import replace
 from pathlib import Path
 
 from brains.config import DEFAULT_CONFIG_PATH, RuntimeSpec, load_runtime_spec
-from brains.infra import MetricsSink, configure_logging, create_run_artifacts, write_json
 from brains.models import get_model_definition
-from brains.runtime import create_model_run_paths, write_model_manifest
+from brains.runtime import (
+    MetricsSink,
+    QualityGateRunner,
+    create_model_run_paths,
+    create_run_artifacts,
+    configure_logging,
+    write_json,
+    write_model_manifest,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -68,6 +75,24 @@ def _parse_args() -> argparse.Namespace:
         help="Override training.population_size from the runtime spec.",
     )
     parser.add_argument(
+        "--control-mode",
+        type=str,
+        default=None,
+        help="Override control.mode. Supported values: motor_targets, command_primitives.",
+    )
+    parser.add_argument(
+        "--command-vocabulary",
+        type=str,
+        default=None,
+        help="Comma-separated command list for control.command_vocabulary (used in command_primitives mode).",
+    )
+    parser.add_argument(
+        "--command-speed",
+        type=float,
+        default=None,
+        help="Override control.default_command_speed.",
+    )
+    parser.add_argument(
         "--progress-every-steps",
         type=int,
         default=0,
@@ -94,6 +119,13 @@ def _apply_cli_overrides(spec: RuntimeSpec, args: argparse.Namespace) -> Runtime
         updated = replace(updated, episode=replace(updated.episode, episode_s=float(args.episode_seconds)))
     if args.population_size is not None:
         updated = replace(updated, training=replace(updated.training, population_size=int(args.population_size)))
+    if args.control_mode is not None:
+        updated = replace(updated, control=replace(updated.control, mode=str(args.control_mode)))
+    if args.command_vocabulary is not None:
+        vocabulary = tuple(part.strip() for part in str(args.command_vocabulary).split(",") if part.strip())
+        updated = replace(updated, control=replace(updated.control, command_vocabulary=vocabulary))
+    if args.command_speed is not None:
+        updated = replace(updated, control=replace(updated.control, default_command_speed=float(args.command_speed)))
     updated.validate()
     return updated
 
@@ -101,11 +133,10 @@ def _apply_cli_overrides(spec: RuntimeSpec, args: argparse.Namespace) -> Runtime
 def main() -> int:
     args = _parse_args()
     from brains.jax_trainer import ESTrainer, apply_runtime_spec
-    from brains.quality import QualityGateRunner
 
     spec = _apply_cli_overrides(load_runtime_spec(args.config), args)
     model_definition = get_model_definition(spec.model.type)
-    apply_runtime_spec(spec)
+    spec = apply_runtime_spec(spec)
     model_paths = create_model_run_paths(args.out_dir, spec.model.type, args.log_id)
 
     artifacts = create_run_artifacts(spec, run_name=args.run_name or model_paths.id)

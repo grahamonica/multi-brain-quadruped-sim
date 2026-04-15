@@ -5,6 +5,16 @@ model:
   architecture: shared_trunk_motor_lanes
   trainer: openai_es
   description: Current JAX policy vector with shared trunk and per-motor lanes.
+  positional_encoding: sinusoidal
+  positional_encoding_gain: 0.35
+
+control:
+  mode: motor_targets
+  command_vocabulary: [trot, turn_left, turn_right, stand]
+  default_command_speed: 0.45
+  command_update_interval_s: 0.60
+  command_default_duration_s: 1.80
+  command_max_duration_s: 4.00
 
 simulator:
   backend: mujoco
@@ -25,10 +35,6 @@ simulator:
 terrain:
   kind: flat
   field_half_m: 6.0
-  center_half_m: 1.5
-  step_count: 2
-  step_width_m: 1.25
-  step_height_m: 0.08
   floor_height_m: 0.0
 
 goals:
@@ -45,14 +51,14 @@ spawn_policy:
 
 friction:
   foot_static: 0.9
-  foot_kinetic: 0.65
+  foot_kinetic: 0.45
   body: 0.35
 
 robot:
   body_length_m: 0.28
   body_width_m: 0.12
   body_height_m: 0.02
-  body_mass_kg: 2.4
+  body_mass_kg: 1.2
   leg_length_m: 0.16
   leg_mass_kg: 0.6
   leg_radius_m: 0.01
@@ -108,9 +114,6 @@ reward:
   side_tip_exit_bonus: 8.0
   progress_reward_scale: 50.0
   goal_reached_bonus: 50.0
-  foot_level_reward_scale: 1.0
-  step_climb_bonus: 30.0
-  escape_bonus: 100.0
 
 training:
   population_size: 8

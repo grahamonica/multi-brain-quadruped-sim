@@ -76,13 +76,9 @@ class MetricsSink:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
-def _sanitize_name(value: str) -> str:
-    return "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in value).strip("-") or "run"
-
-
 def create_run_artifacts(spec: RuntimeSpec, run_name: str | None = None) -> RunArtifacts:
     now = datetime.now(tz=timezone.utc)
-    name = _sanitize_name(run_name or spec.name)
+    name = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in (run_name or spec.name)).strip("-") or "run"
     run_id = f"{now.strftime('%Y%m%dT%H%M%SZ')}-{name}"
     run_dir = Path(spec.logging.root_dir) / run_id
     run_dir.mkdir(parents=True, exist_ok=True)

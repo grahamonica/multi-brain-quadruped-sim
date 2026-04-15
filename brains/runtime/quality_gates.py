@@ -14,9 +14,9 @@ import jax.numpy as jnp
 import numpy as np
 
 import brains.jax_trainer as trainer_module
-from brains.config import RuntimeSpec, load_runtime_spec
+from brains.config import RuntimeSpec
 from brains.sim.mujoco_backend import MuJoCoBackend
-from brains.sim.translators import terrain_height_at
+from brains.sim.mujoco_layout import terrain_height_at
 
 
 @dataclass(frozen=True)
@@ -153,7 +153,7 @@ class QualityGateRunner:
             self.spec.quality_gates.determinism_steps,
             max(1, int(self.spec.episode.episode_s / self.spec.episode.brain_dt_s)),
         )
-        params = trainer_module._init_param_vector(jax.random.PRNGKey(101))
+        params = trainer_module._require_policy_runtime().init_param_vector(jax.random.PRNGKey(101))
         goal = _first_goal(self.spec)
         spawn_xy = _first_spawn(self.spec)
         run_key = jax.random.PRNGKey(202)
@@ -201,7 +201,7 @@ class QualityGateRunner:
             self.spec.quality_gates.performance_steps,
             max(1, int(self.spec.episode.episode_s / self.spec.episode.brain_dt_s)),
         )
-        params = trainer_module._init_param_vector(jax.random.PRNGKey(505))
+        params = trainer_module._require_policy_runtime().init_param_vector(jax.random.PRNGKey(505))
         goal = _first_goal(self.spec)
         spawn_xy = _first_spawn(self.spec)
 
@@ -249,13 +249,6 @@ def collect_regression_metrics(spec: RuntimeSpec, seeds: list[int], generations:
             "goal_xyz": list(trainer.state.goal_xyz),
         }
     return metrics
-
-
-def write_regression_baseline(path: str | Path, metrics: dict[str, Any]) -> Path:
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
-    return target
 
 
 def _select_regression_baseline_variant(baseline: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -344,7 +337,3 @@ def compare_regression_to_baseline(
             )
         )
     return QualityReport(spec_name=spec.name, results=results)
-
-
-def load_spec_and_run_quality(path: str | Path | None = None) -> QualityReport:
-    return QualityGateRunner(load_runtime_spec(path)).run()
