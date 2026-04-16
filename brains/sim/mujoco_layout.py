@@ -65,4 +65,10 @@ def leg_body_fractions(spec: RuntimeSpec) -> tuple[float, ...]:
 
 
 def total_robot_mass_kg(spec: RuntimeSpec) -> float:
-    return float(spec.robot.body_mass_kg) + (len(LEG_NAMES) * float(spec.robot.leg_mass_kg))
+    body_mass = float(spec.robot.body_mass_kg)
+    leg_mass = float(spec.robot.leg_mass_kg)
+    return body_mass + (len(LEG_NAMES) * leg_mass)
+
+
+def terrain_height_at(spec: RuntimeSpec, _xy: tuple[float, float] | list[float]) -> float:
+    return float(spec.terrain.floor_height_m)

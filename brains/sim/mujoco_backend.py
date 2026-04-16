@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import jax
 import jax.numpy as jnp
@@ -14,11 +14,32 @@ import numpy as np
 import brains.jax_trainer as trainer_module
 from brains.config import RuntimeSpec
 
-from .interfaces import BackendCapabilities, LoggedStepCallback
-from .mujoco_layout import LEG_NAMES, body_half_extents, total_robot_mass_kg
+from .action_layer import ActionProjector
+from .mujoco_layout import LEG_NAMES, body_half_extents, terrain_height_at, total_robot_mass_kg
 from .mujoco_model_builder import MujocoModelArtifacts, build_mujoco_model
-from .translators import step_level_at, terrain_height_at
 
+
+LoggedStepCallback = Callable[[dict[str, Any]], None]
+
+
+@dataclass(frozen=True)
+class BackendCapabilities:
+    name: str
+    batched_rollout_support: bool
+    realtime_viewer_support: bool
+    differentiable: bool
+    deterministic_mode_supported: bool
+    max_parallel_envs: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "batched_rollout_support": self.batched_rollout_support,
+            "realtime_viewer_support": self.realtime_viewer_support,
+            "differentiable": self.differentiable,
+            "deterministic_mode_supported": self.deterministic_mode_supported,
+            "max_parallel_envs": self.max_parallel_envs,
+        }
 
 @dataclass
 class _RolloutMetrics:
@@ -90,6 +111,14 @@ class MuJoCoBackend:
         ]
         self._torso_mass = self.body_mass_kg
         self._leg_masses = np.full((self.leg_count,), self.leg_mass_kg, dtype=np.float32)
+        self._action_projector = ActionProjector(
+            mode=self.spec.control.mode,
+            command_vocabulary=self.spec.control.command_vocabulary,
+            default_command_speed=self.spec.control.default_command_speed,
+            command_update_interval_s=self.spec.control.command_update_interval_s,
+            command_default_duration_s=self.spec.control.command_default_duration_s,
+            command_max_duration_s=self.spec.control.command_max_duration_s,
+        )
 
     def make_data(self) -> mujoco.MjData:
         return mujoco.MjData(self.model)
@@ -100,6 +129,7 @@ class MuJoCoBackend:
         return data
 
     def _reset_into(self, data: mujoco.MjData, spawn_xy: np.ndarray | jax.Array | None = None) -> None:
+        self._action_projector.reset()
         if spawn_xy is None:
             spawn_xy_np = np.zeros((2,), dtype=np.float32)
         else:
@@ -184,6 +214,7 @@ class MuJoCoBackend:
         ).astype(np.float32)
         obs[:33] /= np.float32(trainer_module.FIELD_HALF)
         obs[33:] /= np.float32(math.pi)
+        obs = trainer_module.apply_positional_encoding_np(obs)
         return jnp.asarray(obs, dtype=jnp.float32)
 
     def initial_metrics(self, data: mujoco.MjData, goal_xyz: np.ndarray | jax.Array) -> _RolloutMetrics:
@@ -269,21 +300,6 @@ class MuJoCoBackend:
         if exited_side_band:
             reward += float(trainer_module.SIDE_TIP_EXIT_BONUS)
 
-        foot_positions = self.foot_positions(data)
-        foot_levels = np.asarray([step_level_at(self.spec, foot[:2].tolist()) for foot in foot_positions], dtype=np.float32)
-        reward += float(np.mean(foot_levels) * float(trainer_module.FOOT_LEVEL_REWARD_SCALE))
-
-        com_step = float(step_level_at(self.spec, com[:2].tolist()))
-        climbed = com_step > metrics.max_step_reached
-        if climbed:
-            reward += com_step * float(trainer_module.STEP_CLIMB_BONUS)
-        escaped_now = (not metrics.goal_reached) and (
-            com_step >= float(getattr(trainer_module, "N_ARENA_STEPS", self.spec.terrain.step_count))
-        )
-        if escaped_now:
-            reward += float(trainer_module.ESCAPE_BONUS)
-        new_max_step = max(metrics.max_step_reached, com_step)
-
         tipped = side_tip_depth_norm > 0.7
         tipped_time = metrics.tipped_time + float(trainer_module.BRAIN_DT) if tipped else 0.0
         dead = metrics.dead or tipped_time >= float(trainer_module.TIPPED_KILL_TIME_S)
@@ -299,8 +315,8 @@ class MuJoCoBackend:
             closing_rate=closing_rate,
             progress_drop_ratio=progress_drop_ratio,
             prev_side_tip_depth_norm=side_tip_depth_norm,
-            goal_reached=metrics.goal_reached or reached_goal_now or escaped_now,
-            max_step_reached=new_max_step,
+            goal_reached=metrics.goal_reached or reached_goal_now,
+            max_step_reached=metrics.max_step_reached,
             tipped_time=tipped_time,
             dead=dead,
         )
@@ -336,6 +352,8 @@ class MuJoCoBackend:
         goal_xyz: np.ndarray | jax.Array,
         step_index: int,
         total_steps: int,
+        policy_output: np.ndarray | None = None,
+        selected_command: str | None = None,
     ) -> dict[str, Any]:
         body_pos = self.body_position(data)
         body_rot = self.body_rotation(data)
@@ -372,6 +390,8 @@ class MuJoCoBackend:
             "step": int(step_index),
             "total_steps": int(total_steps),
             "reward": float(metrics.total_reward),
+            "qpos": np.asarray(data.qpos, dtype=np.float64).tolist(),
+            "qvel": np.asarray(data.qvel, dtype=np.float64).tolist(),
             "goal": np.asarray(goal_xyz, dtype=np.float32).tolist(),
             "body": {
                 "pos": body_pos.tolist(),
@@ -386,7 +406,9 @@ class MuJoCoBackend:
             "closing_rate_m_s": float(metrics.closing_rate),
             "progress_drop_ratio": float(metrics.progress_drop_ratio),
             "time_s": float(data.time),
-            "level": int(step_level_at(self.spec, com[:2].tolist())),
+            "action_mode": self.spec.control.mode,
+            "policy_output": np.asarray(policy_output, dtype=np.float32).tolist() if policy_output is not None else None,
+            "selected_command": selected_command,
         }
 
     def _advance(self, data: mujoco.MjData, target_velocity: np.ndarray) -> None:
@@ -442,7 +464,7 @@ class MuJoCoBackend:
         steps: int,
         spawn_xy: np.ndarray | jax.Array | None = None,
     ) -> float:
-        params = trainer_module._unflatten_params(jnp.asarray(params_flat, dtype=jnp.float32))
+        params = trainer_module._require_policy_runtime().unflatten_params(jnp.asarray(params_flat, dtype=jnp.float32))
         data = self.reset_data(spawn_xy=spawn_xy)
         goal_xyz_jax = jnp.asarray(goal_xyz, dtype=jnp.float32)
         key_jax = jnp.asarray(key, dtype=jnp.uint32)
@@ -458,13 +480,25 @@ class MuJoCoBackend:
                 key_jax,
                 jnp.float32(metrics.noise_scale),
             )
-            target_velocity = np.clip(
-                np.asarray(motor_cmds, dtype=np.float32) * np.float32(trainer_module.MOTOR_SCALE),
-                -np.float32(trainer_module.MAX_MOTOR_RAD_S),
-                np.float32(trainer_module.MAX_MOTOR_RAD_S),
+            projection = self._action_projector.project(
+                np.asarray(motor_cmds, dtype=np.float32),
+                time_s=float(data.time),
+                max_motor_rad_s=float(trainer_module.MAX_MOTOR_RAD_S),
+                motor_scale=float(trainer_module.MOTOR_SCALE),
             )
+            target_velocity = np.asarray(projection.target_velocity_rad_s, dtype=np.float32)
             self._advance(data, target_velocity)
             metrics = self._step_metrics(data, metrics, goal_xyz_jax)
-            on_step(self._snapshot(data, metrics, goal_xyz_jax, step_index, int(steps)))
+            on_step(
+                self._snapshot(
+                    data,
+                    metrics,
+                    goal_xyz_jax,
+                    step_index,
+                    int(steps),
+                    policy_output=projection.policy_output,
+                    selected_command=projection.selected_command,
+                )
+            )
 
         return float(metrics.total_reward)

@@ -24,59 +24,17 @@ def _float_list(values: tuple[float, ...] | list[float]) -> str:
     return " ".join(f"{float(value):.6f}" for value in values)
 
 
-def _build_step_strips(spec: RuntimeSpec, friction: float, contact_margin_m: float) -> list[str]:
-    terrain = spec.terrain
-    floor_height = float(spec.terrain.floor_height_m)
-    strips: list[str] = []
-    rgba_cycle = (
-        "0.16 0.21 0.15 1",
-        "0.20 0.29 0.18 1",
-        "0.27 0.39 0.22 1",
-        "0.37 0.49 0.26 1",
-        "0.49 0.59 0.31 1",
-    )
-    for level in range(1, terrain.step_count + 1):
-        inner = terrain.center_half_m + ((level - 1) * terrain.step_width_m)
-        outer = terrain.center_half_m + (level * terrain.step_width_m)
-        top = floor_height + (level * terrain.step_height_m)
-        half_height = max((top - floor_height) * 0.5, 1e-3)
-        center_z = floor_height + half_height
-        strip_half = max((outer - inner) * 0.5, 1e-3)
-        color = rgba_cycle[min(level - 1, len(rgba_cycle) - 1)]
-        common = (
-            f'type="box" friction="{friction:.4f} 0.01 0.001" margin="{contact_margin_m:.6f}" '
-            f'rgba="{color}"'
-        )
-
-        strips.append(
-            f'<geom name="step_{level}_north" {common} pos="0 {(inner + outer) * 0.5:.6f} {center_z:.6f}" '
-            f'size="{outer:.6f} {strip_half:.6f} {half_height:.6f}"/>'
-        )
-        strips.append(
-            f'<geom name="step_{level}_south" {common} pos="0 {-((inner + outer) * 0.5):.6f} {center_z:.6f}" '
-            f'size="{outer:.6f} {strip_half:.6f} {half_height:.6f}"/>'
-        )
-        strips.append(
-            f'<geom name="step_{level}_east" {common} pos="{((inner + outer) * 0.5):.6f} 0 {center_z:.6f}" '
-            f'size="{strip_half:.6f} {inner:.6f} {half_height:.6f}"/>'
-        )
-        strips.append(
-            f'<geom name="step_{level}_west" {common} pos="{-((inner + outer) * 0.5):.6f} 0 {center_z:.6f}" '
-            f'size="{strip_half:.6f} {inner:.6f} {half_height:.6f}"/>'
-        )
-    return strips
-
-
 def build_mujoco_model(spec: RuntimeSpec) -> MujocoModelArtifacts:
     mujoco_spec = spec.simulator.mujoco
     leg_mounts = mount_points_body(spec)
     body_half_sizes = body_half_extents(spec)
     leg_length_m = float(spec.robot.leg_length_m)
     leg_radius_m = float(spec.robot.leg_radius_m)
-    foot_radius_m = float(spec.robot.foot_radius_m)
+    body_mass_kg = float(spec.robot.body_mass_kg)
+    foot_radius_m = leg_radius_m
     leg_mass_kg = float(spec.robot.leg_mass_kg)
     static_friction = float(spec.friction.foot_static)
-    body_mass_kg = float(spec.robot.body_mass_kg)
+    kinetic_friction = float(spec.friction.foot_kinetic)
     body_friction = float(spec.friction.body)
 
     body_name = "torso"
@@ -104,10 +62,10 @@ def build_mujoco_model(spec: RuntimeSpec) -> MujocoModelArtifacts:
                 f'range="{joint_min:.6f} {joint_max:.6f}" damping="{spec.robot.motor_viscous_damping_per_s:.6f}"/>'
                 f'<geom name="{leg_name}_capsule" type="capsule" fromto="0 0 0 0 0 {-leg_length_m:.6f}" '
                 f'size="{leg_radius_m:.6f}" mass="{leg_mass_kg * 0.92:.6f}" '
-                f'friction="{static_friction:.4f} 0.01 0.001" rgba="0.68 0.73 0.75 1"/>'
+                f'friction="{body_friction:.4f} 0.0012 0.00008" rgba="0.68 0.73 0.75 1"/>'
                 f'<geom name="{leg_name}_foot" type="sphere" pos="0 0 {-leg_length_m:.6f}" '
                 f'size="{foot_radius_m:.6f}" mass="{leg_mass_kg * 0.08:.6f}" '
-                f'friction="{static_friction:.4f} 0.01 0.001" rgba="0.93 0.77 0.44 1"/>'
+                f'friction="{static_friction:.4f} 0.0012 0.00008" priority="2" rgba="0.93 0.77 0.44 1"/>'
                 f'<site name="{foot_site_name}" pos="0 0 {-leg_length_m:.6f}" size="{max(foot_radius_m * 0.5, 0.003):.6f}"/>'
                 f"</body>"
             )
@@ -117,18 +75,10 @@ def build_mujoco_model(spec: RuntimeSpec) -> MujocoModelArtifacts:
         (
             f'<geom name="ground" type="plane" pos="0 0 {spec.terrain.floor_height_m:.6f}" '
             f'size="{spec.terrain.field_half_m:.6f} {spec.terrain.field_half_m:.6f} 0.1" '
-            f'friction="{static_friction:.4f} 0.01 0.001" '
-            f'margin="{mujoco_spec.contact_margin_m:.6f}" rgba="0.07 0.12 0.08 1"/>'
+            f'friction="{static_friction:.4f} 0.0025 0.0001" material="ground_grid" '
+            f'margin="{mujoco_spec.contact_margin_m:.6f}"/>'
         )
     ]
-    if spec.terrain.kind == "stepped_arena":
-        ground_geoms.extend(
-            _build_step_strips(
-                spec,
-                friction=static_friction,
-                contact_margin_m=mujoco_spec.contact_margin_m,
-            )
-        )
 
     actuators = [
         (
@@ -145,6 +95,11 @@ def build_mujoco_model(spec: RuntimeSpec) -> MujocoModelArtifacts:
         f'integrator="{mujoco_spec.integrator}" solver="{mujoco_spec.solver}" '
         f'iterations="{mujoco_spec.solver_iterations}" ls_iterations="{mujoco_spec.line_search_iterations}" '
         f'noslip_iterations="{mujoco_spec.noslip_iterations}"/>'
+        '<asset>'
+        '<texture name="ground_checker" type="2d" builtin="checker" width="512" height="512" '
+        'rgb1="0.08 0.13 0.09" rgb2="0.16 0.23 0.17"/>'
+        '<material name="ground_grid" texture="ground_checker" texuniform="true" texrepeat="18 18" reflectance="0.03"/>'
+        '</asset>'
         '<default>'
         f'<geom contype="1" conaffinity="1" condim="4" margin="{mujoco_spec.contact_margin_m:.6f}" solref="0.005 1"/>'
         '<joint limited="true" armature="0.01"/>'

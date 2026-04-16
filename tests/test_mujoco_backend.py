@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from brains.config import load_runtime_spec
-from brains.quality import QualityGateRunner
+from brains.runtime import QualityGateRunner
 from brains.sim.mujoco_backend import MuJoCoBackend
 from brains.jax_trainer import ESTrainer
 

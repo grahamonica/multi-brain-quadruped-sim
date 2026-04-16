@@ -1,12 +1,7 @@
-"""Simulator backend helpers."""
+"""Simulator backend and action-layer modules.
 
-from .interfaces import BackendCapabilities, RolloutBackend
-from .translators import single_step_to_viewer_frame, step_level_at, terrain_height_at
-
-__all__ = [
-    "BackendCapabilities",
-    "RolloutBackend",
-    "single_step_to_viewer_frame",
-    "step_level_at",
-    "terrain_height_at",
-]
+Import from submodules directly (`brains.sim.mujoco_backend`,
+`brains.sim.action_layer`, etc.) — this package does not re-export, since most
+consumers only need one or two names and simulator submodules pull in heavy
+dependencies lazily.
+"""
