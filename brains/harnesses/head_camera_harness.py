@@ -68,16 +68,6 @@ class HeadCameraHarness(DirectionHarness):
         ]
         return backend
 
-    def render_camera_frame(self, model: Any, data: Any) -> np.ndarray:
-        import mujoco
-
-        camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, self.camera.name)
-        if camera_id < 0:
-            raise ValueError(f"MuJoCo model does not contain camera {self.camera.name!r}.")
-        with mujoco.Renderer(model, width=self.camera.width, height=self.camera.height) as renderer:
-            renderer.update_scene(data, camera=self.camera.name)
-            return np.asarray(renderer.render(), dtype=np.uint8)
-
     def camera_observation_metadata(self, frame: dict[str, Any], command_option: str) -> dict[str, Any]:
         body = frame.get("body", {})
         return {

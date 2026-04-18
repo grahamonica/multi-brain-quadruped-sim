@@ -15,6 +15,7 @@ from typing import Any, Callable
 import numpy as np
 
 from brains.config import DEFAULT_CONFIG_PATH, RuntimeSpec, load_runtime_spec
+from brains.sim.action_layer import command_target_velocity
 
 
 StepCallback = Callable[[dict[str, Any]], None]
@@ -67,9 +68,14 @@ class DirectionHarness:
 
     OPTIONS: tuple[HarnessOption, ...] = (
         HarnessOption("stand", ("stand", "hold", "idle", "stay"), "Hold all leg velocity targets at zero.", 1.0, 0.0),
-        HarnessOption("trot", ("trot", "forward", "go forward", "walk"), "Alternating diagonal gait.", 2.0, 0.55),
-        HarnessOption("turn_left", ("turn left", "left", "rotate left"), "Bias right-side leg motion to yaw left.", 1.5, 0.45),
-        HarnessOption("turn_right", ("turn right", "right", "rotate right"), "Bias left-side leg motion to yaw right.", 1.5, 0.45),
+        HarnessOption("trot", ("trot", "forward", "go forward"), "Alternating diagonal gait.", 2.0, 0.50),
+        HarnessOption("walk", ("walk", "slow walk", "stroll"), "Slower four-phase stepping pattern.", 2.0, 0.40),
+        HarnessOption("skip", ("skip", "hop"), "Faster asymmetric skipping cadence.", 1.6, 0.45),
+        HarnessOption("turn_left", ("turn left", "left", "rotate left"), "Stabilized yaw-left gait.", 1.5, 0.55),
+        HarnessOption("turn_right", ("turn right", "right", "rotate right"), "Stabilized yaw-right gait.", 1.5, 0.55),
+        HarnessOption("front_flip", ("front flip", "forward flip", "frontflip"), "Aggressive front-flip impulse pattern.", 1.0, 1.0),
+        HarnessOption("back_flip", ("back flip", "backward flip", "backflip"), "Aggressive back-flip impulse pattern.", 1.0, 1.0),
+        HarnessOption("side_roll", ("side roll", "roll", "barrel roll"), "Lateral rolling impulse pattern.", 1.0, 0.75),
         HarnessOption("back_up", ("back up", "back", "reverse"), "Run the trot phase in reverse.", 1.5, 0.4),
         HarnessOption("stop", ("stop", "halt", "pause"), "End with zero motor targets.", 0.75, 0.0),
     )
@@ -127,23 +133,13 @@ class DirectionHarness:
             raise ValueError(f"Unknown harness option {option_name!r}.")
         option = self._options_by_name[option_name]
         resolved_speed = float(option.default_speed if speed is None else speed)
-        max_velocity = float(self.spec.robot.max_motor_rad_s)
-        amplitude = np.float32(max_velocity * np.clip(resolved_speed, 0.0, 1.0))
-        phase = np.float32(math.sin(2.0 * math.pi * 1.7 * float(time_s)))
-        diagonal = np.asarray([1.0, -1.0, -1.0, 1.0], dtype=np.float32)
-        lateral = np.asarray([-1.0, 1.0, -1.0, 1.0], dtype=np.float32)
-
-        if option_name in {"stand", "stop"}:
-            return np.zeros((4,), dtype=np.float32)
-        if option_name == "trot":
-            return amplitude * phase * diagonal
-        if option_name == "back_up":
-            return -amplitude * phase * diagonal
-        if option_name == "turn_left":
-            return amplitude * phase * (0.65 * diagonal + 0.35 * lateral)
-        if option_name == "turn_right":
-            return amplitude * phase * (0.65 * diagonal - 0.35 * lateral)
-        raise ValueError(f"No target generator for {option_name!r}.")
+        command_name = "stand" if option_name == "stop" else option_name
+        return command_target_velocity(
+            command_name,
+            time_s=time_s,
+            speed=resolved_speed,
+            max_motor_rad_s=float(self.spec.robot.max_motor_rad_s),
+        )
 
     def default_goal(self) -> np.ndarray:
         return np.asarray([self.spec.goals.radius_m, 0.0, self.spec.goals.height_m], dtype=np.float32)

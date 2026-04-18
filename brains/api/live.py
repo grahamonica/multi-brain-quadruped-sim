@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,14 +21,20 @@ from brains.runtime import discover_model_artifacts, find_model_artifact, runtim
 
 from .common import (
     BroadcastHub,
+    build_tracking_camera,
     build_viewer_metadata,
     current_policy_params,
-    single_step_to_frame,
-    viewer_reset_steps,
+    encode_rgb_frame,
 )
 
 
-FRAME_BATCH_SIZE = 12
+FRAME_BATCH_SIZE = 4
+CONTINUOUS_VIEWER_STEPS = int(2_000_000_000)
+VIEWER_FRAME_WIDTH = int(os.environ.get("QUADRUPED_VIEWER_WIDTH", "640"))
+VIEWER_FRAME_HEIGHT = int(os.environ.get("QUADRUPED_VIEWER_HEIGHT", "360"))
+VIEWER_CAMERA_DISTANCE_M = float(os.environ.get("QUADRUPED_VIEWER_CAMERA_DISTANCE_M", "3.8"))
+VIEWER_CAMERA_AZIMUTH_DEG = float(os.environ.get("QUADRUPED_VIEWER_CAMERA_AZIMUTH_DEG", "135.0"))
+VIEWER_CAMERA_ELEVATION_DEG = float(os.environ.get("QUADRUPED_VIEWER_CAMERA_ELEVATION_DEG", "-22.0"))
 
 
 class ReplayRestart(Exception):
@@ -79,20 +86,6 @@ def _checkpoint_root() -> Path:
     return Path(os.environ.get("QUADRUPED_CHECKPOINT_ROOT", "checkpoints"))
 
 
-def _cors_origins() -> list[str]:
-    raw_origins = os.environ.get("QUADRUPED_CORS_ORIGINS", "*")
-    return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
-
-
-def _path_signature(path: Path | None) -> tuple[str, int] | None:
-    if path is None:
-        return None
-    try:
-        return str(path.resolve()), path.stat().st_mtime_ns
-    except OSError:
-        return None
-
-
 def _models_message(selected_model_id: str | None) -> dict[str, Any]:
     artifacts = discover_model_artifacts(_checkpoint_root())
     return {
@@ -100,11 +93,6 @@ def _models_message(selected_model_id: str | None) -> dict[str, Any]:
         "models": [artifact.to_message() for artifact in artifacts],
         "selected_model_id": selected_model_id,
     }
-
-
-def _default_selected_model_id() -> str | None:
-    artifacts = discover_model_artifacts(_checkpoint_root())
-    return artifacts[0].id if artifacts else None
 
 
 def _load_trainer_for_selection(
@@ -141,9 +129,32 @@ def _load_trainer_for_selection(
     return trainer, artifact, loaded_checkpoint, tuple(skipped)
 
 
+def _render_frame_payload(
+    *,
+    mujoco_module: Any,
+    model: Any,
+    data: Any,
+    renderer: Any,
+    camera: Any,
+    step_message: dict[str, Any],
+) -> dict[str, Any]:
+    qpos = np.asarray(step_message["qpos"], dtype=np.float64)
+    qvel = np.asarray(step_message["qvel"], dtype=np.float64)
+    data.qpos[:] = qpos
+    data.qvel[:] = qvel
+    if data.act.size:
+        data.act[:] = 0.0
+    data.time = float(step_message.get("time_s", 0.0))
+    mujoco_module.mj_forward(model, data)
+    renderer.update_scene(data, camera=camera)
+    rgb = np.asarray(renderer.render(), dtype=np.uint8)
+    return encode_rgb_frame(rgb)
+
+
 def _viewer_thread(hub: BroadcastHub, controls: ViewerControls, config_path: Path, seed: int) -> None:
     import jax
     import jax.numpy as jnp
+    import mujoco
 
     active_signature: tuple[str | None, tuple[str, int] | None] | None = None
     trainer: Any | None = None
@@ -151,22 +162,82 @@ def _viewer_thread(hub: BroadcastHub, controls: ViewerControls, config_path: Pat
     loaded_checkpoint: Path | None = None
     skipped: tuple[dict[str, str], ...] = ()
     replay_index = 0
+    renderer = None
+    render_data = None
+    render_model = None
+    render_camera = None
 
     while True:
         snapshot = controls.snapshot()
         selected_model_id = snapshot.selected_model_id
-        if selected_model_id is None:
-            selected_model_id = _default_selected_model_id()
-            if selected_model_id is not None:
-                controls.set_model(selected_model_id)
-                snapshot = controls.snapshot()
 
         selected_artifact = find_model_artifact(selected_model_id, _checkpoint_root()) if selected_model_id else None
-        checkpoint_signature = _path_signature(selected_artifact.checkpoint_path) if selected_artifact is not None else None
+        if selected_artifact is None or selected_artifact.checkpoint_path is None:
+            checkpoint_signature = None
+        else:
+            try:
+                checkpoint_signature = (
+                    str(selected_artifact.checkpoint_path.resolve()),
+                    selected_artifact.checkpoint_path.stat().st_mtime_ns,
+                )
+            except OSError:
+                checkpoint_signature = None
         next_signature = (selected_model_id, checkpoint_signature)
         if trainer is None or next_signature != active_signature:
-            trainer, artifact, loaded_checkpoint, skipped = _load_trainer_for_selection(config_path, seed, selected_model_id)
-            active_signature = next_signature
+            if renderer is not None:
+                renderer.close()
+                renderer = None
+                render_data = None
+                render_model = None
+                render_camera = None
+            try:
+                trainer, artifact, loaded_checkpoint, skipped = _load_trainer_for_selection(config_path, seed, selected_model_id)
+            except Exception as exc:
+                skipped_path = str(selected_artifact.checkpoint_path) if selected_artifact is not None else str(config_path)
+                skipped = ({"path": skipped_path, "reason": str(exc)},)
+                active_signature = None
+                hub.publish(_models_message(selected_model_id))
+                hub.publish(
+                    {
+                        "type": "generation",
+                        "stream_id": f"error:{selected_model_id or 'scratch'}:{time.time_ns()}",
+                        "generation": 0,
+                        "mean_reward": 0.0,
+                        "best_reward": 0.0,
+                        "top_rewards": [],
+                        "rewards_history": [],
+                        "goal": list(snapshot.goal_xyz) if snapshot.goal_xyz is not None else None,
+                        "selected_model_id": selected_model_id,
+                        "model": selected_artifact.to_message() if selected_artifact is not None else None,
+                        "checkpoint_loaded": None,
+                        "playback_only": True,
+                        "simulator_backend": "mujoco",
+                        "viewer_frame_width": VIEWER_FRAME_WIDTH,
+                        "viewer_frame_height": VIEWER_FRAME_HEIGHT,
+                        "skipped_checkpoints": list(skipped),
+                    }
+                )
+                time.sleep(0.5)
+                continue
+            if selected_artifact is not None and loaded_checkpoint is None:
+                active_signature = None
+            else:
+                active_signature = next_signature
+            backend = trainer._rollout_backend
+            render_model = backend.model
+            render_data = backend.make_data()
+            render_camera = build_tracking_camera(
+                mujoco,
+                backend._torso_body_id,
+                distance_m=VIEWER_CAMERA_DISTANCE_M,
+                azimuth_deg=VIEWER_CAMERA_AZIMUTH_DEG,
+                elevation_deg=VIEWER_CAMERA_ELEVATION_DEG,
+            )
+            renderer = mujoco.Renderer(
+                render_model,
+                width=VIEWER_FRAME_WIDTH,
+                height=VIEWER_FRAME_HEIGHT,
+            )
             hub.publish(build_viewer_metadata(trainer.spec, mode="viewer").to_message())
 
         assert trainer is not None
@@ -179,7 +250,7 @@ def _viewer_thread(hub: BroadcastHub, controls: ViewerControls, config_path: Pat
         else:
             goal_xyz = trainer._random_goal()
         trainer.state.goal_xyz = tuple(float(value) for value in goal_xyz.tolist())
-        replay_steps = viewer_reset_steps(spec)
+        replay_steps = CONTINUOUS_VIEWER_STEPS
         replay_index += 1
         stream_id = f"{selected_model_id or 'scratch'}:{snapshot.version}:{replay_index}"
         hub.publish(
@@ -197,9 +268,14 @@ def _viewer_thread(hub: BroadcastHub, controls: ViewerControls, config_path: Pat
                 "checkpoint_loaded": str(loaded_checkpoint) if loaded_checkpoint is not None else None,
                 "playback_only": True,
                 "simulator_backend": spec.simulator.backend,
+                "viewer_frame_width": VIEWER_FRAME_WIDTH,
+                "viewer_frame_height": VIEWER_FRAME_HEIGHT,
                 "skipped_checkpoints": list(skipped),
             }
         )
+        if selected_artifact is not None and loaded_checkpoint is None:
+            time.sleep(0.5)
+            continue
 
         frame_batch: list[dict[str, Any]] = []
 
@@ -220,7 +296,29 @@ def _viewer_thread(hub: BroadcastHub, controls: ViewerControls, config_path: Pat
         def _emit(step_message: dict) -> None:
             if controls.version_changed(snapshot.version):
                 raise ReplayRestart()
-            frame = single_step_to_frame(step_message, generation=trainer.state.generation, spec=spec)
+            assert render_model is not None
+            assert render_data is not None
+            assert render_camera is not None
+            assert renderer is not None
+            frame = {
+                "type": "frame",
+                "gen": int(trainer.state.generation),
+                "step": int(step_message.get("step", 0)),
+                "total_steps": int(step_message.get("total_steps", 0)),
+                "time_s": float(step_message.get("time_s", 0.0)),
+                "goal": [float(value) for value in step_message.get("goal", [])],
+                "reward": float(step_message.get("reward", 0.0)),
+                "action_mode": step_message.get("action_mode"),
+                "selected_command": step_message.get("selected_command"),
+            }
+            frame["render"] = _render_frame_payload(
+                mujoco_module=mujoco,
+                model=render_model,
+                data=render_data,
+                renderer=renderer,
+                camera=render_camera,
+                step_message=step_message,
+            )
             frame["stream_id"] = stream_id
             frame["selected_model_id"] = selected_model_id
             frame_batch.append(frame)
@@ -240,7 +338,7 @@ def _viewer_thread(hub: BroadcastHub, controls: ViewerControls, config_path: Pat
 async def lifespan(app: FastAPI):
     config_path, seed = _load_service_config()
     hub = BroadcastHub()
-    controls = ViewerControls(selected_model_id=_default_selected_model_id())
+    controls = ViewerControls(selected_model_id=None)
     hub.attach_loop(asyncio.get_running_loop())
     thread = threading.Thread(target=_viewer_thread, args=(hub, controls, config_path, seed), daemon=True, name="viewer")
     app.state.hub = hub
@@ -251,7 +349,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Quadruped Viewer API", lifespan=lifespan)
-_allowed_origins = _cors_origins()
+_raw_origins = os.environ.get("QUADRUPED_CORS_ORIGINS", "*")
+_allowed_origins = [origin.strip() for origin in _raw_origins.split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
@@ -293,6 +392,8 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             if message_type == "select_model":
                 model_id = message.get("model_id")
                 controls.set_model(str(model_id) if model_id else None)
+                hub.publish(_models_message(controls.snapshot().selected_model_id))
+            elif message_type == "refresh_models":
                 hub.publish(_models_message(controls.snapshot().selected_model_id))
             elif message_type == "set_goal":
                 goal = message.get("goal")

@@ -8,6 +8,7 @@ from .direction_harness import (
     MotionCommand,
 )
 from .head_camera_harness import CameraConfig, HeadCameraHarness
+from .vla_harness import VLAAgent, VLAHarness
 
 __all__ = [
     "CameraConfig",
@@ -17,4 +18,6 @@ __all__ = [
     "HarnessRun",
     "HeadCameraHarness",
     "MotionCommand",
+    "VLAAgent",
+    "VLAHarness",
 ]

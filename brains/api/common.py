@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,17 +12,14 @@ from fastapi import WebSocket
 
 from brains.config import RuntimeSpec
 from brains.models import list_model_definitions
-from brains.sim import single_step_to_viewer_frame as translate_single_step_to_viewer_frame
 from brains.sim.mujoco_layout import LEG_NAMES, LEG_ROTATION_AXIS_BODY, mount_points_body
-
-
-VIEWER_RESET_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
 class ViewerMetadata:
     mode: str
     config_name: str
+    control: dict[str, Any]
     terrain: dict[str, Any]
     robot: dict[str, Any]
     model: dict[str, Any]
@@ -34,6 +32,7 @@ class ViewerMetadata:
             "type": "metadata",
             "mode": self.mode,
             "config_name": self.config_name,
+            "control": self.control,
             "terrain": self.terrain,
             "robot": self.robot,
             "model": self.model,
@@ -85,11 +84,15 @@ def build_viewer_metadata(spec: RuntimeSpec, mode: str) -> ViewerMetadata:
     terrain = {
         "kind": spec.terrain.kind,
         "field_half_m": spec.terrain.field_half_m,
-        "center_half_m": spec.terrain.center_half_m,
-        "step_count": spec.terrain.step_count,
-        "step_width_m": spec.terrain.step_width_m,
-        "step_height_m": spec.terrain.step_height_m,
         "floor_height_m": spec.terrain.floor_height_m,
+    }
+    control = {
+        "mode": spec.control.mode,
+        "command_vocabulary": list(spec.control.command_vocabulary),
+        "default_command_speed": spec.control.default_command_speed,
+        "command_update_interval_s": spec.control.command_update_interval_s,
+        "command_default_duration_s": spec.control.command_default_duration_s,
+        "command_max_duration_s": spec.control.command_max_duration_s,
     }
     mount_points = mount_points_body(spec)
     rotation_axes = [list(LEG_ROTATION_AXIS_BODY) for _ in LEG_NAMES]
@@ -115,13 +118,14 @@ def build_viewer_metadata(spec: RuntimeSpec, mode: str) -> ViewerMetadata:
         "architecture": spec.model.architecture,
         "trainer": spec.model.trainer,
         "description": spec.model.description,
+        "positional_encoding": spec.model.positional_encoding,
+        "positional_encoding_gain": spec.model.positional_encoding_gain,
         "registered": [definition.to_dict() for definition in list_model_definitions()],
     }
     training = {
         "population_size": spec.training.population_size,
         "episode_s": spec.episode.episode_s,
         "selection_interval_s": spec.episode.selection_interval_s,
-        "viewer_reset_s": VIEWER_RESET_SECONDS,
         "brain_dt_s": spec.episode.brain_dt_s,
     }
     simulator = {
@@ -132,6 +136,7 @@ def build_viewer_metadata(spec: RuntimeSpec, mode: str) -> ViewerMetadata:
     return ViewerMetadata(
         mode=mode,
         config_name=spec.name,
+        control=control,
         terrain=terrain,
         robot=robot,
         model=model,
@@ -141,13 +146,32 @@ def build_viewer_metadata(spec: RuntimeSpec, mode: str) -> ViewerMetadata:
     )
 
 
-def viewer_reset_steps(spec: RuntimeSpec) -> int:
-    return max(1, int(VIEWER_RESET_SECONDS / spec.episode.brain_dt_s))
-
-
 def current_policy_params(trainer: Any) -> np.ndarray:
     return np.asarray(trainer.params, dtype=np.float32)
 
 
-def single_step_to_frame(step_message: dict[str, Any], generation: int, spec: RuntimeSpec) -> dict[str, Any]:
-    return translate_single_step_to_viewer_frame(step_message, generation=generation, spec=spec)
+def build_tracking_camera(
+    mujoco_module: Any,
+    torso_body_id: int,
+    *,
+    distance_m: float,
+    azimuth_deg: float,
+    elevation_deg: float,
+) -> Any:
+    camera = mujoco_module.MjvCamera()
+    camera.type = mujoco_module.mjtCamera.mjCAMERA_TRACKING
+    camera.trackbodyid = int(torso_body_id)
+    camera.distance = float(distance_m)
+    camera.azimuth = float(azimuth_deg)
+    camera.elevation = float(elevation_deg)
+    return camera
+
+
+def encode_rgb_frame(rgb: np.ndarray) -> dict[str, Any]:
+    encoded_rgb = base64.b64encode(np.ascontiguousarray(rgb).tobytes()).decode("ascii")
+    return {
+        "rgb": encoded_rgb,
+        "width": int(rgb.shape[1]),
+        "height": int(rgb.shape[0]),
+        "channels": int(rgb.shape[2]),
+    }
