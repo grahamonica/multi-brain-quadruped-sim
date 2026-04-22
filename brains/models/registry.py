@@ -8,15 +8,21 @@ already talk in terms of model types before additional architectures land.
 from __future__ import annotations
 
 import json
+import importlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
+import jax
+import jax.numpy as jnp
+
+from brains.config import RuntimeSpec
 
 CURRENT_MODEL_TYPE = "shared_trunk_es"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MODEL_REGISTRY_PATH = PROJECT_ROOT / "configs" / "model_registry.json"
+INLINE_PREFIX = "inline:"
 
 
 @dataclass(frozen=True)
@@ -28,8 +34,9 @@ class ModelDefinition:
     output_size: int
     parameter_count: int
     description: str
+    policy_entrypoint: str | None = None
 
-    def to_dict(self) -> dict[str, int | str]:
+    def to_dict(self) -> dict[str, int | str | None]:
         return {
             "type": self.type,
             "architecture": self.architecture,
@@ -38,21 +45,15 @@ class ModelDefinition:
             "output_size": self.output_size,
             "parameter_count": self.parameter_count,
             "description": self.description,
+            "policy_entrypoint": self.policy_entrypoint,
         }
 
 
-def _default_definitions() -> dict[str, ModelDefinition]:
-    return {
-        CURRENT_MODEL_TYPE: ModelDefinition(
-            type=CURRENT_MODEL_TYPE,
-            architecture="shared_trunk_motor_lanes",
-            trainer="openai_es",
-            input_size=48,
-            output_size=4,
-            parameter_count=48516,
-            description="Current JAX policy vector with shared trunk and per-motor lanes.",
-        ),
-    }
+@dataclass(frozen=True)
+class PolicyPlugin:
+    init_params: Callable[[jax.Array], Any]
+    zero_state: Callable[[], Any]
+    step: Callable[[Any, Any, jax.Array, jax.Array, jax.Array], tuple[Any, jax.Array, jax.Array]]
 
 
 def model_registry_path() -> Path:
@@ -68,6 +69,7 @@ def _definition_from_mapping(data: Mapping[str, Any]) -> ModelDefinition:
         output_size=int(data["output_size"]),
         parameter_count=int(data["parameter_count"]),
         description=str(data.get("description", "")),
+        policy_entrypoint=str(data["policy_entrypoint"]) if data.get("policy_entrypoint") is not None else None,
     )
     validate_model_definition(definition)
     return definition
@@ -80,16 +82,124 @@ def validate_model_definition(definition: ModelDefinition) -> None:
         raise ValueError("model definition type may only contain letters, numbers, underscores, hyphens, and periods.")
     if not definition.architecture:
         raise ValueError("model definition architecture must be non-empty.")
-    if definition.trainer != "openai_es":
-        raise ValueError("only openai_es model definitions are supported by the current trainer.")
+    if not definition.trainer:
+        raise ValueError("model definition trainer must be non-empty.")
     if definition.input_size <= 0 or definition.output_size <= 0:
         raise ValueError("model definition input_size and output_size must be > 0.")
     if definition.parameter_count <= 0:
         raise ValueError("model definition parameter_count must be > 0.")
+    if definition.policy_entrypoint is not None and ":" not in definition.policy_entrypoint:
+        raise ValueError(
+            "model definition policy_entrypoint must use 'module.path:function_name' or 'inline:name' format."
+        )
+
+
+_INLINE_POLICY_FACTORIES: dict[str, Callable[[RuntimeSpec, ModelDefinition], Any]] = {}
+
+
+def register_inline_policy_factory(name: str, factory: Callable[[RuntimeSpec, ModelDefinition], Any]) -> str:
+    """Register an in-process policy factory and return the entrypoint string."""
+
+    if not name or any(ch in name for ch in (":", "/")):
+        raise ValueError("Inline factory name must be non-empty and free of ':' and '/'.")
+    if not callable(factory):
+        raise ValueError("Inline factory must be callable.")
+    _INLINE_POLICY_FACTORIES[name] = factory
+    return f"{INLINE_PREFIX}{name}"
+
+
+def _resolve_policy_entrypoint(entrypoint: str) -> Callable[[RuntimeSpec, ModelDefinition], Any]:
+    if entrypoint.startswith(INLINE_PREFIX):
+        name = entrypoint[len(INLINE_PREFIX):]
+        factory = _INLINE_POLICY_FACTORIES.get(name)
+        if factory is None:
+            known = ", ".join(sorted(_INLINE_POLICY_FACTORIES)) or "<none>"
+            raise ValueError(f"Inline policy factory {name!r} is not registered. Registered: {known}.")
+        return factory
+    if ":" not in entrypoint:
+        raise ValueError(
+            "policy_entrypoint must use 'module.path:function_name' or 'inline:name' format. "
+            f"Received: {entrypoint!r}."
+        )
+    module_name, function_name = entrypoint.split(":", 1)
+    module = importlib.import_module(module_name)
+    factory = getattr(module, function_name, None)
+    if factory is None or not callable(factory):
+        raise ValueError(f"Policy entrypoint {entrypoint!r} did not resolve to a callable.")
+    return factory
+
+
+def _policy_plugin_from_payload(payload: Any) -> PolicyPlugin:
+    if isinstance(payload, PolicyPlugin):
+        return payload
+
+    if hasattr(payload, "init_params") and hasattr(payload, "zero_state") and hasattr(payload, "step"):
+        return PolicyPlugin(
+            init_params=payload.init_params,
+            zero_state=payload.zero_state,
+            step=payload.step,
+        )
+
+    if isinstance(payload, dict):
+        init_params = payload.get("init_params")
+        zero_state = payload.get("zero_state")
+        step = payload.get("step")
+        if callable(init_params) and callable(zero_state) and callable(step):
+            return PolicyPlugin(
+                init_params=init_params,
+                zero_state=zero_state,
+                step=step,
+            )
+
+    raise ValueError(
+        "Policy plugin payload must provide callable init_params, zero_state, and step members."
+    )
+
+
+def load_policy_plugin(spec: RuntimeSpec, model_definition: ModelDefinition) -> PolicyPlugin | None:
+    entrypoint = model_definition.policy_entrypoint
+    if not entrypoint:
+        return None
+    factory = _resolve_policy_entrypoint(entrypoint)
+    payload = factory(spec, model_definition)
+    plugin = _policy_plugin_from_payload(payload)
+
+    params = plugin.init_params(jax.random.PRNGKey(0))
+    state = plugin.zero_state()
+    obs = jnp.zeros((model_definition.input_size,), dtype=jnp.float32)
+    next_state, output, next_key = plugin.step(
+        params,
+        state,
+        obs,
+        jax.random.PRNGKey(1),
+        jnp.float32(0.0),
+    )
+    output_shape = tuple(getattr(output, "shape", ()))
+    if output_shape != (model_definition.output_size,):
+        raise ValueError(
+            "Policy plugin output size mismatch. "
+            f"Model definition expects {model_definition.output_size}, plugin produced {output_shape}."
+        )
+    if next_state is None:
+        raise ValueError("Policy plugin step returned None state. Return state passthrough if stateless.")
+    if tuple(getattr(next_key, "shape", ())) != (2,):
+        raise ValueError("Policy plugin step must return a JAX PRNG key in the third position.")
+
+    return plugin
 
 
 def load_model_definitions(registry_path: str | Path | None = None) -> dict[str, ModelDefinition]:
-    definitions = _default_definitions()
+    definitions = {
+        CURRENT_MODEL_TYPE: ModelDefinition(
+            type=CURRENT_MODEL_TYPE,
+            architecture="shared_trunk_motor_lanes",
+            trainer="openai_es",
+            input_size=48,
+            output_size=4,
+            parameter_count=48516,
+            description="Current JAX policy vector with shared trunk and per-motor lanes.",
+        ),
+    }
     path = Path(registry_path) if registry_path is not None else model_registry_path()
     if not path.exists():
         return definitions
