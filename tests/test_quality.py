@@ -5,12 +5,12 @@ import unittest
 from pathlib import Path
 
 from brains.config import load_runtime_spec
-from brains.quality import QualityGateRunner, compare_regression_to_baseline
+from brains.runtime import QualityGateRunner, compare_regression_to_baseline
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SMOKE_CONFIG = PROJECT_ROOT / "configs" / "smoke.yaml"
-REGRESSION_BASELINE = PROJECT_ROOT / "tests" / "fixtures" / "smoke_regression_baseline.json"
+REGRESSION_BASELINE = PROJECT_ROOT / "tests" / "smoke_regression_baseline.json"
 
 
 class QualityGateTests(unittest.TestCase):

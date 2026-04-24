@@ -23,12 +23,6 @@ def _as_points(value: Any, field_name: str) -> tuple[tuple[float, float], ...]:
     return tuple(points)
 
 
-def _as_float_triple(value: Any, field_name: str) -> tuple[float, float, float]:
-    if not isinstance(value, (list, tuple)) or len(value) != 3:
-        raise ValueError(f"{field_name} must be a 3-item list or tuple.")
-    return float(value[0]), float(value[1]), float(value[2])
-
-
 def _merge_section(default_value: Any, override: Any) -> Any:
     if override is None:
         return default_value
@@ -46,6 +40,8 @@ class ModelSpec:
     architecture: str = "shared_trunk_motor_lanes"
     trainer: str = "openai_es"
     description: str = "Current JAX policy vector with shared trunk and per-motor lanes."
+    positional_encoding: str = "sinusoidal"
+    positional_encoding_gain: float = 0.35
 
     def validate(self) -> None:
         if not self.type:
@@ -54,34 +50,25 @@ class ModelSpec:
             raise ValueError("model.type may only contain letters, numbers, underscores, hyphens, and periods.")
         if not self.architecture:
             raise ValueError("model.architecture must be non-empty.")
-        if self.trainer != "openai_es":
-            raise ValueError("model.trainer must be 'openai_es' for the current registered model.")
+        if not self.trainer:
+            raise ValueError("model.trainer must be non-empty.")
+        if self.positional_encoding not in {"none", "sinusoidal"}:
+            raise ValueError("model.positional_encoding must be 'none' or 'sinusoidal'.")
+        if not 0.0 <= self.positional_encoding_gain <= 1.0:
+            raise ValueError("model.positional_encoding_gain must be in [0, 1].")
 
 
 @dataclass(frozen=True)
 class TerrainSpec:
-    kind: str = "stepped_arena"
+    kind: str = "flat"
     field_half_m: float = 15.0
-    center_half_m: float = 2.5
-    step_count: int = 5
-    step_width_m: float = 2.0
-    step_height_m: float = 0.15
     floor_height_m: float = 0.0
 
     def validate(self) -> None:
-        if self.kind not in {"stepped_arena", "flat"}:
-            raise ValueError("terrain.kind must be 'stepped_arena' or 'flat'.")
+        if self.kind != "flat":
+            raise ValueError("terrain.kind must be 'flat'.")
         if self.field_half_m <= 0.0:
             raise ValueError("terrain.field_half_m must be > 0.")
-        if self.kind == "stepped_arena":
-            if self.center_half_m <= 0.0:
-                raise ValueError("terrain.center_half_m must be > 0 for stepped arenas.")
-            if self.step_count < 0:
-                raise ValueError("terrain.step_count must be >= 0.")
-            if self.step_width_m <= 0.0:
-                raise ValueError("terrain.step_width_m must be > 0.")
-            if self.step_height_m < 0.0:
-                raise ValueError("terrain.step_height_m must be >= 0.")
 
 
 @dataclass(frozen=True)
@@ -144,7 +131,7 @@ class RobotSpec:
     body_length_m: float = 0.28
     body_width_m: float = 0.12
     body_height_m: float = 0.02
-    body_mass_kg: float = 2.4
+    body_mass_kg: float = 1.2
     leg_length_m: float = 0.16
     leg_mass_kg: float = 0.6
     leg_radius_m: float = 0.010
@@ -276,9 +263,6 @@ class RewardSpec:
     side_tip_exit_bonus: float = 8.0
     progress_reward_scale: float = 50.0
     goal_reached_bonus: float = 50.0
-    foot_level_reward_scale: float = 1.0
-    step_climb_bonus: float = 30.0
-    escape_bonus: float = 100.0
 
     def validate(self) -> None:
         positive_or_zero_fields = {
@@ -289,9 +273,6 @@ class RewardSpec:
             "side_tip_exit_bonus": self.side_tip_exit_bonus,
             "progress_reward_scale": self.progress_reward_scale,
             "goal_reached_bonus": self.goal_reached_bonus,
-            "foot_level_reward_scale": self.foot_level_reward_scale,
-            "step_climb_bonus": self.step_climb_bonus,
-            "escape_bonus": self.escape_bonus,
         }
         for field_name, value in positive_or_zero_fields.items():
             if value < 0.0:
@@ -331,6 +312,38 @@ class TrainingSpec:
             raise ValueError("training.parent_elite_count must be > 0.")
         if self.parent_elite_count > self.population_size:
             raise ValueError("training.parent_elite_count cannot exceed training.population_size.")
+
+
+@dataclass(frozen=True)
+class ControlSpec:
+    mode: str = "motor_targets"
+    command_vocabulary: tuple[str, ...] = ("trot", "turn_left", "turn_right", "stand")
+    default_command_speed: float = 0.45
+    command_update_interval_s: float = 0.60
+    command_default_duration_s: float = 1.80
+    command_max_duration_s: float = 4.00
+
+    def validate(self) -> None:
+        if self.mode not in {"motor_targets", "command_primitives"}:
+            raise ValueError("control.mode must be 'motor_targets' or 'command_primitives'.")
+        if self.default_command_speed <= 0.0:
+            raise ValueError("control.default_command_speed must be > 0.")
+        if self.command_update_interval_s <= 0.0:
+            raise ValueError("control.command_update_interval_s must be > 0.")
+        if self.command_default_duration_s < self.command_update_interval_s:
+            raise ValueError(
+                "control.command_default_duration_s must be >= control.command_update_interval_s."
+            )
+        if self.command_max_duration_s < self.command_default_duration_s:
+            raise ValueError(
+                "control.command_max_duration_s must be >= control.command_default_duration_s."
+            )
+        if self.mode == "command_primitives":
+            if len(self.command_vocabulary) == 0:
+                raise ValueError("control.command_vocabulary must be non-empty in command_primitives mode.")
+            for index, command in enumerate(self.command_vocabulary):
+                if not command or not isinstance(command, str):
+                    raise ValueError(f"control.command_vocabulary[{index}] must be a non-empty command name.")
 
 
 @dataclass(frozen=True)
@@ -450,6 +463,7 @@ class LoggingSpec:
 class RuntimeSpec:
     name: str = "default"
     model: ModelSpec = field(default_factory=ModelSpec)
+    control: ControlSpec = field(default_factory=ControlSpec)
     simulator: SimulatorSpec = field(default_factory=SimulatorSpec)
     terrain: TerrainSpec = field(default_factory=TerrainSpec)
     goals: GoalSpec = field(default_factory=GoalSpec)
@@ -467,6 +481,7 @@ class RuntimeSpec:
         if not self.name:
             raise ValueError("config.name must be non-empty.")
         self.model.validate()
+        self.control.validate()
         self.simulator.validate()
         self.terrain.validate()
         self.goals.validate()
@@ -495,8 +510,54 @@ def runtime_spec_from_dict(raw_data: Mapping[str, Any] | None) -> RuntimeSpec:
     quality_profile = str(data["quality_gates"].get("profile", "runtime"))
     if quality_profile == "reference":
         quality_profile = "runtime"
+    terrain_data = data.get("terrain", {})
+    if not isinstance(terrain_data, Mapping):
+        raise ValueError("terrain must be an object/mapping.")
+    terrain_defaults = TerrainSpec()
+    terrain = TerrainSpec(
+        kind=str(terrain_data.get("kind", terrain_defaults.kind)),
+        field_half_m=float(terrain_data.get("field_half_m", terrain_defaults.field_half_m)),
+        floor_height_m=float(terrain_data.get("floor_height_m", terrain_defaults.floor_height_m)),
+    )
+
     goals_fixed = data["goals"].get("fixed_goal_xyz")
     fixed_goal = None if goals_fixed is None else tuple(float(value) for value in goals_fixed)
+    spawn_data = data.get("spawn_policy", {})
+    if not isinstance(spawn_data, Mapping):
+        raise ValueError("spawn_policy must be an object/mapping.")
+    spawn_defaults = SpawnPolicySpec()
+    spawn_x_range = spawn_data.get("x_range_m", list(spawn_defaults.x_range_m))
+    spawn_y_range = spawn_data.get("y_range_m", list(spawn_defaults.y_range_m))
+    spawn_fixed_points = spawn_data.get("fixed_points", list(spawn_defaults.fixed_points))
+    reward_data = data.get("reward", {})
+    if not isinstance(reward_data, Mapping):
+        raise ValueError("reward must be an object/mapping.")
+    reward_defaults = RewardSpec()
+    reward = RewardSpec(
+        default_motor_noise_scale=float(
+            reward_data.get("default_motor_noise_scale", reward_defaults.default_motor_noise_scale)
+        ),
+        max_motor_noise_scale=float(reward_data.get("max_motor_noise_scale", reward_defaults.max_motor_noise_scale)),
+        fast_progress_tau_s=float(reward_data.get("fast_progress_tau_s", reward_defaults.fast_progress_tau_s)),
+        slow_progress_tau_s=float(reward_data.get("slow_progress_tau_s", reward_defaults.slow_progress_tau_s)),
+        dramatic_progress_drop_ratio=float(
+            reward_data.get("dramatic_progress_drop_ratio", reward_defaults.dramatic_progress_drop_ratio)
+        ),
+        noise_attack_tau_s=float(reward_data.get("noise_attack_tau_s", reward_defaults.noise_attack_tau_s)),
+        noise_release_tau_s=float(reward_data.get("noise_release_tau_s", reward_defaults.noise_release_tau_s)),
+        side_tip_band_half_width_deg=float(
+            reward_data.get("side_tip_band_half_width_deg", reward_defaults.side_tip_band_half_width_deg)
+        ),
+        side_tip_depth_penalty_scale=float(
+            reward_data.get("side_tip_depth_penalty_scale", reward_defaults.side_tip_depth_penalty_scale)
+        ),
+        side_tip_escape_delta_scale=float(
+            reward_data.get("side_tip_escape_delta_scale", reward_defaults.side_tip_escape_delta_scale)
+        ),
+        side_tip_exit_bonus=float(reward_data.get("side_tip_exit_bonus", reward_defaults.side_tip_exit_bonus)),
+        progress_reward_scale=float(reward_data.get("progress_reward_scale", reward_defaults.progress_reward_scale)),
+        goal_reached_bonus=float(reward_data.get("goal_reached_bonus", reward_defaults.goal_reached_bonus)),
+    )
 
     spec = RuntimeSpec(
         name=str(data["name"]),
@@ -505,6 +566,16 @@ def runtime_spec_from_dict(raw_data: Mapping[str, Any] | None) -> RuntimeSpec:
             architecture=str(data["model"]["architecture"]),
             trainer=str(data["model"]["trainer"]),
             description=str(data["model"].get("description", "")),
+            positional_encoding=str(data["model"].get("positional_encoding", "sinusoidal")),
+            positional_encoding_gain=float(data["model"].get("positional_encoding_gain", 0.35)),
+        ),
+        control=ControlSpec(
+            mode=str(data["control"]["mode"]),
+            command_vocabulary=tuple(str(command) for command in data["control"]["command_vocabulary"]),
+            default_command_speed=float(data["control"]["default_command_speed"]),
+            command_update_interval_s=float(data["control"]["command_update_interval_s"]),
+            command_default_duration_s=float(data["control"]["command_default_duration_s"]),
+            command_max_duration_s=float(data["control"]["command_max_duration_s"]),
         ),
         simulator=SimulatorSpec(
             backend=simulator_backend,
@@ -526,7 +597,7 @@ def runtime_spec_from_dict(raw_data: Mapping[str, Any] | None) -> RuntimeSpec:
                 ),
             ),
         ),
-        terrain=TerrainSpec(**data["terrain"]),
+        terrain=terrain,
         goals=GoalSpec(
             strategy=str(data["goals"]["strategy"]),
             radius_m=float(data["goals"]["radius_m"]),
@@ -534,16 +605,16 @@ def runtime_spec_from_dict(raw_data: Mapping[str, Any] | None) -> RuntimeSpec:
             fixed_goal_xyz=fixed_goal,
         ),
         spawn_policy=SpawnPolicySpec(
-            strategy=str(data["spawn_policy"]["strategy"]),
-            x_range_m=_as_float_pair(data["spawn_policy"]["x_range_m"], "spawn_policy.x_range_m"),
-            y_range_m=_as_float_pair(data["spawn_policy"]["y_range_m"], "spawn_policy.y_range_m"),
-            fixed_points=_as_points(data["spawn_policy"].get("fixed_points"), "spawn_policy.fixed_points"),
+            strategy=str(spawn_data.get("strategy", spawn_defaults.strategy)),
+            x_range_m=_as_float_pair(spawn_x_range, "spawn_policy.x_range_m"),
+            y_range_m=_as_float_pair(spawn_y_range, "spawn_policy.y_range_m"),
+            fixed_points=_as_points(spawn_fixed_points, "spawn_policy.fixed_points"),
         ),
         friction=FrictionSpec(**data["friction"]),
         robot=RobotSpec(**data["robot"]),
         physics=PhysicsSpec(**data["physics"]),
         episode=EpisodeRulesSpec(**data["episode"]),
-        reward=RewardSpec(**data["reward"]),
+        reward=reward,
         training=TrainingSpec(**data["training"]),
         quality_gates=QualityGateSpec(
             profile=quality_profile,

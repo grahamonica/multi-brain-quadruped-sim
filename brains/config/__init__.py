@@ -10,10 +10,11 @@ from .io import (
     load_runtime_spec,
     save_runtime_spec,
 )
-from .schema import DEFAULT_SPEC, ModelSpec, RuntimeSpec, runtime_spec_from_dict
+from .schema import ControlSpec, DEFAULT_SPEC, ModelSpec, RuntimeSpec, runtime_spec_from_dict
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
+    "ControlSpec",
     "DEFAULT_SPEC",
     "ModelSpec",
     "RuntimeSpec",

@@ -15,7 +15,13 @@ class RuntimeConfigTests(unittest.TestCase):
         spec = load_runtime_spec(DEFAULT_CONFIG_PATH)
         self.assertEqual(spec.name, "default")
         self.assertEqual(spec.training.population_size, 32)
-        self.assertEqual(spec.terrain.kind, "stepped_arena")
+        self.assertEqual(spec.terrain.kind, "flat")
+
+    def test_stepped_arena_is_rejected(self) -> None:
+        bad_config = load_runtime_spec(DEFAULT_CONFIG_PATH).to_dict()
+        bad_config["terrain"]["kind"] = "stepped_arena"
+        with self.assertRaises(ValueError):
+            runtime_spec_from_dict(bad_config)
 
     def test_invalid_spawn_policy_is_rejected(self) -> None:
         bad_config = load_runtime_spec(DEFAULT_CONFIG_PATH).to_dict()
